@@ -263,7 +263,8 @@ impl RepositoryStore {
                 now,
                 raw_json
             ],
-        ).map_err(|error| error.to_string())?;
+        )
+        .map_err(|error| error.to_string())?;
 
         for asset in &repo.system_files {
             let storage_id = global_id(&repo.metadata.id, &asset.id);
@@ -533,7 +534,10 @@ impl RepositoryStore {
     pub fn delete_download(&self, subject_id: &str) -> Result<bool, String> {
         let changed = self
             .conn
-            .execute("DELETE FROM downloads WHERE subject_id = ?1", params![subject_id])
+            .execute(
+                "DELETE FROM downloads WHERE subject_id = ?1",
+                params![subject_id],
+            )
             .map_err(|error| error.to_string())?;
         Ok(changed > 0)
     }
@@ -788,6 +792,57 @@ impl RepositoryStore {
         )?;
         self.record_download(game_id, "game", Some(save_dir), None, None)?;
         Ok(record)
+    }
+
+    pub fn record_direct_game_download_completed(
+        &self,
+        game_id: &str,
+        source_kind: &str,
+        local_path: &str,
+        sha256: &str,
+        total_bytes: u64,
+    ) -> Result<(DownloadRecord, TorrentDownloadRecord), String> {
+        let download =
+            self.record_download(game_id, "game", Some(local_path), Some(sha256), None)?;
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO torrent_downloads (
+              game_id, magnet_uri, save_dir, status, progress_percent,
+              downloaded_bytes, total_bytes, download_speed_bytes_per_sec,
+              upload_speed_bytes_per_sec, peers_count, torrent_id, error_message,
+              created_at, updated_at, completed_at
+            ) VALUES (?1, ?2, ?3, 'completed', 100, ?4, ?4, 0, 0, 0, NULL, NULL, ?5, ?5, ?5)
+            ON CONFLICT(game_id) DO UPDATE SET
+              magnet_uri = excluded.magnet_uri,
+              save_dir = excluded.save_dir,
+              status = excluded.status,
+              progress_percent = excluded.progress_percent,
+              downloaded_bytes = excluded.downloaded_bytes,
+              total_bytes = excluded.total_bytes,
+              download_speed_bytes_per_sec = excluded.download_speed_bytes_per_sec,
+              upload_speed_bytes_per_sec = excluded.upload_speed_bytes_per_sec,
+              peers_count = excluded.peers_count,
+              torrent_id = excluded.torrent_id,
+              error_message = excluded.error_message,
+              updated_at = excluded.updated_at,
+              completed_at = excluded.completed_at
+            "#,
+                params![
+                    game_id,
+                    format!("direct:{source_kind}"),
+                    local_path,
+                    u64_to_i64(total_bytes),
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+
+        let torrent = self
+            .get_torrent_download(game_id)?
+            .ok_or_else(|| "Direct download record was not persisted.".to_string())?;
+        Ok((download, torrent))
     }
 
     pub fn trust_executable(
@@ -1344,6 +1399,32 @@ mod tests {
         assert_eq!(legacy.subject_type, "game");
         assert_eq!(legacy.status, "ready");
         assert_eq!(legacy.local_path.as_deref(), Some("F:/Games/repo-game"));
+    }
+
+    #[test]
+    fn records_direct_completed_downloads_for_launcher_state() {
+        let dir = tempdir().unwrap();
+        let store = RepositoryStore::open(&dir.path().join("retrohydra.db")).unwrap();
+
+        let (download, torrent) = store
+            .record_direct_game_download_completed(
+                "repo::game",
+                "bundled",
+                "F:/Games/game.nes",
+                &"b".repeat(64),
+                24_592,
+            )
+            .unwrap();
+
+        assert_eq!(download.status, "ready");
+        assert_eq!(download.local_path.as_deref(), Some("F:/Games/game.nes"));
+        assert_eq!(torrent.status, "completed");
+        assert_eq!(torrent.magnet_uri, "direct:bundled");
+        assert_eq!(torrent.save_dir, "F:/Games/game.nes");
+        assert_eq!(torrent.progress_percent, 100.0);
+        assert_eq!(torrent.downloaded_bytes, 24_592);
+        assert_eq!(torrent.total_bytes, 24_592);
+        assert!(torrent.completed_at.is_some());
     }
 
     #[test]

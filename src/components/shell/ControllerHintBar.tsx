@@ -6,8 +6,7 @@ const VIEW_HINTS: Record<LauncherView, Array<{ key: string; label: string; tone:
   home: [
     { key: 'A', label: 'Select', tone: 'bg-green-500' },
     { key: 'B', label: 'Back', tone: 'bg-red-500' },
-    { key: 'Y', label: 'Details', tone: 'bg-yellow-500' },
-    { key: 'X', label: 'Search', tone: 'bg-blue-500' }
+    { key: 'Y', label: 'Details', tone: 'bg-yellow-500' }
   ],
   library: [
     { key: 'A', label: 'Open', tone: 'bg-green-500' },

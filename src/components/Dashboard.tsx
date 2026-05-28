@@ -11,14 +11,12 @@ import {
   Clipboard,
   Download,
   FolderOpen,
-  Gamepad2,
   HeartPulse,
   Loader2,
   Pause,
   Play,
   RefreshCcw,
   RotateCw,
-  Search,
   Settings,
   ShieldAlert
 } from 'lucide-react';
@@ -50,10 +48,19 @@ import type {
   LaunchFailure,
   RepositorySummary,
   TorrentDownloadRecord,
-  TorrentDownloadStatus
+  TorrentDownloadStatus,
+  UpdateCheckError,
+  UpdateCheckReport
 } from '@/types/repository';
 
 type BusyAction = string | null;
+type UpdatePanelPhase = 'idle' | 'checking' | 'up-to-date' | 'available' | 'installing' | 'error';
+
+interface UpdatePanelState {
+  phase: UpdatePanelPhase;
+  report: UpdateCheckReport | null;
+  error: UpdateCheckError | null;
+}
 
 interface DashboardProps {
   catalog: CatalogGame[];
@@ -107,6 +114,11 @@ export function Dashboard({
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [launchFailure, setLaunchFailure] = useState<LaunchFailure | null>(null);
   const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
+  const [updatePanel, setUpdatePanel] = useState<UpdatePanelState>({
+    phase: 'idle',
+    report: null,
+    error: null
+  });
 
   useEffect(() => {
     setCatalog(catalog);
@@ -238,6 +250,42 @@ export function Dashboard({
     });
   };
 
+  const checkAppUpdate = async () => {
+    setUpdatePanel((current) => ({ ...current, phase: 'checking', error: null }));
+    try {
+      const report = await api.checkAppUpdate();
+      setUpdatePanel({
+        phase: report.available ? 'available' : 'up-to-date',
+        report,
+        error: null
+      });
+    } catch (error) {
+      setUpdatePanel({
+        phase: 'error',
+        report: null,
+        error: normalizeUpdateCheckError(error)
+      });
+    }
+  };
+
+  const installAppUpdate = async () => {
+    setUpdatePanel((current) => ({ ...current, phase: 'installing', error: null }));
+    try {
+      await api.installAppUpdate();
+      setUpdatePanel((current) => ({
+        phase: 'up-to-date',
+        report: current.report,
+        error: null
+      }));
+    } catch (error) {
+      setUpdatePanel((current) => ({
+        phase: 'error',
+        report: current.report,
+        error: normalizeUpdateCheckError(error)
+      }));
+    }
+  };
+
   const startDownload = async (item: GameLibraryItem) => {
     await runAction(`download:${item.game.id}`, async () => {
       await api.startGameDownload(item.game.id);
@@ -291,7 +339,6 @@ export function Dashboard({
     }
     if (kind === 'top') {
       if (value === 'refresh') void refreshAll();
-      if (value === 'search') setLauncherMessage('Search is staged for the next UI pass.');
       return;
     }
     if (kind === 'filter') {
@@ -359,7 +406,6 @@ export function Dashboard({
       else if (settingsOpen) setSettingsOpen(false);
       else setActiveView('home');
     },
-    onSearch: () => setLauncherMessage('Search is staged for the next UI pass.'),
     onMenu: (focusId) => {
       const gameId = focusId?.startsWith('game:') ? safeDecodeURIComponent(focusId.split(':').at(-1) ?? '') : null;
       if (gameId) setSelectedGameId(gameId);
@@ -378,7 +424,6 @@ export function Dashboard({
     >
       <TopChrome
         onRefresh={refreshAll}
-        onSearch={() => setLauncherMessage('Search is staged for the next UI pass.')}
         onFocus={setFocusedItemId}
         refreshing={busyAction === 'refresh'}
       />
@@ -450,6 +495,7 @@ export function Dashboard({
           settings={settings}
           busyAction={busyAction}
           healthReport={healthReport}
+          updatePanel={updatePanel}
           onOpenSettings={() => setSettingsOpen(true)}
           onDisconnect={disconnect}
           onRefresh={refreshAll}
@@ -457,6 +503,8 @@ export function Dashboard({
           onRunHealth={runHealthCheck}
           onCopyDiagnostics={copyDiagnostics}
           onOpenLogs={() => api.openLogsFolder()}
+          onCheckAppUpdate={checkAppUpdate}
+          onInstallAppUpdate={installAppUpdate}
         />
       )}
 
@@ -511,32 +559,17 @@ export function Dashboard({
 
 function TopChrome({
   onRefresh,
-  onSearch,
   onFocus,
   refreshing
 }: {
   onRefresh: () => void;
-  onSearch: () => void;
   onFocus: (focusId: string) => void;
   refreshing: boolean;
 }) {
   return (
     <header className="rh-topbar">
-      <div className="flex items-center gap-3 text-xs font-black uppercase tracking-[0.18em] text-white/70">
-        <Gamepad2 className="h-4 w-4 text-hydra-accent" />
-        Console Shell
-      </div>
+      <div />
       <div className="flex items-center gap-3">
-        <button
-          data-focus-id="top:search"
-          data-focus-zone="topbar"
-          onFocus={() => onFocus('top:search')}
-          onClick={onSearch}
-          className="rh-icon-button rh-focusable"
-          title="Search"
-        >
-          <Search className="h-4 w-4" />
-        </button>
         <button
           data-focus-id="top:refresh"
           data-focus-zone="topbar"
@@ -548,7 +581,7 @@ function TopChrome({
         >
           {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
         </button>
-        <div className="min-w-[74px] text-right text-sm font-black">{formatClock(new Date())}</div>
+        <div className="min-w-[74px] text-right text-sm font-black text-white/86">{formatClock(new Date())}</div>
       </div>
     </header>
   );
@@ -619,14 +652,14 @@ function ExploreScreen({
   onOpenEvent: (event: ActivityEvent) => void;
   onFocus: (focusId: string) => void;
 }) {
-  const visible = events.length > 0 ? events : buildFallbackEvents(items);
-
   return (
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="rh-screen rh-panel">
       <ScreenHeader eyebrow="Explore" title="Activity Feed" description="Recent repository, library, and download events" />
       <div className="rh-explore-layout">
         <div className="rh-activity-list">
-          {visible.slice(0, 12).map((event, index) => {
+          {events.length === 0 ? (
+            <div className="rh-empty-compact">No activity yet.</div>
+          ) : events.slice(0, 12).map((event) => {
             const focusId = `activity:${encodeURIComponent(event.gameId ?? event.id)}`;
             return (
               <button
@@ -777,18 +810,22 @@ function SettingsScreen({
   settings,
   busyAction,
   healthReport,
+  updatePanel,
   onOpenSettings,
   onDisconnect,
   onRefresh,
   onRefreshRepository,
   onRunHealth,
   onCopyDiagnostics,
-  onOpenLogs
+  onOpenLogs,
+  onCheckAppUpdate,
+  onInstallAppUpdate
 }: {
   repositories: RepositorySummary[];
   settings: AppSettings;
   busyAction: BusyAction;
   healthReport: HealthReport | null;
+  updatePanel: UpdatePanelState;
   onOpenSettings: () => void;
   onDisconnect: (repositoryId: string) => Promise<void>;
   onRefresh: () => Promise<void>;
@@ -796,6 +833,8 @@ function SettingsScreen({
   onRunHealth: () => Promise<void>;
   onCopyDiagnostics: () => Promise<void>;
   onOpenLogs: () => Promise<void>;
+  onCheckAppUpdate: () => Promise<void>;
+  onInstallAppUpdate: () => Promise<void>;
 }) {
   const configured = Object.values(settings.emulators).filter(Boolean).length;
 
@@ -880,7 +919,66 @@ function SettingsScreen({
           <div className="rh-empty-compact">Run diagnostics to inspect MVP readiness.</div>
         )}
       </div>
+      <UpdateCheckPanel
+        state={updatePanel}
+        onCheck={onCheckAppUpdate}
+        onInstall={onInstallAppUpdate}
+      />
     </motion.section>
+  );
+}
+
+function UpdateCheckPanel({
+  state,
+  onCheck,
+  onInstall
+}: {
+  state: UpdatePanelState;
+  onCheck: () => Promise<void>;
+  onInstall: () => Promise<void>;
+}) {
+  const checking = state.phase === 'checking';
+  const installing = state.phase === 'installing';
+  const busy = checking || installing;
+
+  return (
+    <div className="mt-4 rounded-md border border-white/10 bg-black/24 p-5">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 font-black uppercase">
+            <RefreshCcw className="h-4 w-4 text-hydra-accent" />
+            Update Check
+          </div>
+          <div className="mt-1 text-sm text-white/46">GitHub Releases updater for the Windows MVP build.</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onCheck} disabled={busy} className="rh-mini-action">
+            {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCcw className="h-3.5 w-3.5" />}
+            {state.phase === 'error' ? 'Retry' : 'Check'}
+          </button>
+          {state.phase === 'available' && (
+            <button onClick={onInstall} disabled={busy} className="rh-mini-action">
+              {installing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              Update now
+            </button>
+          )}
+        </div>
+      </div>
+      <div className={`rh-update-status rh-update-status-${state.phase}`}>
+        {state.phase === 'idle' && 'Check for updates when you are ready.'}
+        {state.phase === 'checking' && 'Checking GitHub Releases...'}
+        {state.phase === 'installing' && 'Downloading and installing update...'}
+        {state.phase === 'up-to-date' && `RetroHydra is up to date${state.report?.currentVersion ? ` (${state.report.currentVersion})` : ''}.`}
+        {state.phase === 'available' && (
+          <div>
+            <div className="font-black text-white">Version {state.report?.version ?? 'unknown'} available</div>
+            {state.report?.body && <div className="mt-1 text-white/50">{state.report.body}</div>}
+            {state.report?.date && <div className="mt-1 text-white/36">Published {state.report.date}</div>}
+          </div>
+        )}
+        {state.phase === 'error' && updateErrorMessage(state.error)}
+      </div>
+    </div>
   );
 }
 
@@ -1076,32 +1174,34 @@ function StatsLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function buildFallbackEvents(items: GameLibraryItem[]): ActivityEvent[] {
-  const first = items[0];
-  return [
-    {
-      id: 'repo-ready',
-      title: 'Repository connected',
-      detail: `${items.length} games available`,
-      timestamp: new Date().toISOString(),
-      tone: 'info'
-    },
-    {
-      id: 'library-updated',
-      title: 'Library indexed',
-      detail: first ? first.game.title : 'Waiting for catalog entries',
-      timestamp: new Date().toISOString(),
-      gameId: first?.game.id,
-      tone: 'success'
-    },
-    {
-      id: 'settings-check',
-      title: 'System check available',
-      detail: 'Open Settings to configure emulator paths',
-      timestamp: new Date().toISOString(),
-      tone: 'warning'
+function updateErrorMessage(error: UpdateCheckError | null) {
+  if (error?.kind === 'endpointUnreachable') return 'Could not reach update server';
+  if (error?.kind === 'signatureInvalid') return 'Update signature could not be verified.';
+  if (error?.kind === 'parseError') return error.message ? `Update metadata is invalid: ${error.message}` : 'Update metadata is invalid.';
+  return 'Could not check for updates.';
+}
+
+function normalizeUpdateCheckError(error: unknown): UpdateCheckError {
+  if (isUpdateCheckError(error)) return error;
+  if (typeof error === 'object' && error !== null && 'kind' in error) {
+    const kind = String((error as { kind?: unknown }).kind);
+    if (kind === 'endpointUnreachable' || kind === 'parseError' || kind === 'signatureInvalid') {
+      const message = 'message' in error ? String((error as { message?: unknown }).message ?? '') : undefined;
+      return { kind, message };
     }
-  ];
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return { kind: 'parseError', message };
+}
+
+function isUpdateCheckError(error: unknown): error is UpdateCheckError {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'kind' in error &&
+    ['endpointUnreachable', 'parseError', 'signatureInvalid'].includes(String((error as { kind?: unknown }).kind))
+  );
 }
 
 function formatEventTime(timestamp: string) {

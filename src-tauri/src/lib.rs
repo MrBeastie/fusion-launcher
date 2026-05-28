@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
+mod builtin_demo;
+mod app_update;
 mod commands;
 mod downloads;
 mod launcher;
@@ -29,6 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -58,7 +61,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::preview_repository,
+            commands::preview_builtin_demo_repository,
             commands::connect_repository,
+            commands::connect_builtin_demo_repository,
             commands::refresh_repository,
             commands::get_onboarding_state,
             commands::list_repositories,
@@ -91,7 +96,9 @@ pub fn run() {
             torrent::list_torrent_downloads,
             torrent::pause_download,
             torrent::resume_download,
-            torrent::cancel_download
+            torrent::cancel_download,
+            app_update::check_app_update,
+            app_update::install_app_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run RetroHydra");

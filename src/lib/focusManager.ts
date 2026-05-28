@@ -14,14 +14,12 @@ export interface FocusTarget {
 export interface FocusActionMap {
   activate: string[];
   back: string[];
-  search: string[];
   menu: string[];
 }
 
 export const DEFAULT_FOCUS_ACTIONS: FocusActionMap = {
   activate: ['Enter', 'Space', 'GamepadA'],
   back: ['Escape', 'Backspace', 'GamepadB'],
-  search: ['KeyX', 'GamepadX'],
   menu: ['KeyY', 'GamepadY']
 };
 
@@ -56,7 +54,6 @@ export function nextFocusTarget(
 export function actionForInput(code: string, actions: FocusActionMap = DEFAULT_FOCUS_ACTIONS) {
   if (actions.activate.includes(code)) return 'activate';
   if (actions.back.includes(code)) return 'back';
-  if (actions.search.includes(code)) return 'search';
   if (actions.menu.includes(code)) return 'menu';
   return null;
 }

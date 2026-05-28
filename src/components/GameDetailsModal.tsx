@@ -60,7 +60,7 @@ export function GameDetailsModal({
   void settings;
 
   const downloadableSource = useMemo(
-    () => game.downloads.find((source) => source.kind === 'magnet' || source.kind === 'http') ?? null,
+    () => game.downloads.find((source) => source.kind === 'magnet' || source.kind === 'http' || source.kind === 'bundled') ?? null,
     [game.downloads]
   );
 

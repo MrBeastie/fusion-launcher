@@ -44,14 +44,14 @@ export function GamePoster({
         onClick={() => onOpen(item.game)}
         className="rh-focusable relative block w-full overflow-hidden rounded-md text-left"
       >
-        <GameArt game={item.game} className={compact ? 'h-[94px]' : 'aspect-[2/3]'} />
+        <GameArt game={item.game} className={compact ? 'rh-compact-art' : 'aspect-[2/3]'} />
         <div className={`rh-card-status rh-card-status-${item.statusTone}`}>{compact ? shortStatusLabel(item.statusLabel) : item.statusLabel}</div>
         {progressVisible && (
           <div className="rh-card-progress">
             <div style={{ width: `${item.readyToPlay ? 100 : item.progressPercent}%` }} />
           </div>
         )}
-        <div className={compact ? 'min-h-[40px] px-2 py-1.5' : 'min-h-[48px] px-2.5 py-2'}>
+        <div className={compact ? 'rh-compact-card-copy' : 'min-h-[48px] px-2.5 py-2'}>
           <div className={`${compact ? 'text-[10px]' : 'text-[11px]'} line-clamp-2 font-black uppercase leading-tight text-white`}>{item.game.title}</div>
           <div className="mt-1 flex items-center justify-between gap-2 text-[10px] uppercase text-white/46">
             <span>{item.game.platform}</span>
@@ -106,17 +106,23 @@ export function GameArt({
         <img src={game.coverImageUrl} alt="" className="h-full w-full object-cover" />
       ) : (
         <div className="absolute inset-0" style={hero ? generated.heroStyle : generated.posterStyle}>
-          <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.08),transparent_28%),radial-gradient(circle_at_25%_80%,rgba(255,255,255,0.08),transparent_24%)]" />
-          <div className="absolute inset-x-4 top-4 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.14em] text-white/56">
-            <span>{game.platform}</span>
-            <span>RH</span>
-          </div>
-          <div className="absolute inset-0 grid place-items-center">
-            <div className="text-center">
-              <div className={`${hero ? 'text-7xl' : 'text-3xl'} font-black tracking-normal text-white/90`}>{generated.initials}</div>
-              {!hero && <div className="mt-2 max-w-[120px] text-[10px] font-bold uppercase leading-tight text-white/52">{PLATFORM_LABELS[game.platform]}</div>}
-            </div>
-          </div>
+          <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.10),transparent_23%),linear-gradient(0deg,rgba(0,0,0,0.34),transparent_44%)]" />
+          {hero ? (
+            <div className="rh-hero-figure" />
+          ) : (
+            <>
+              <div className="absolute inset-x-4 top-4 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.14em] text-white/56">
+                <span>{game.platform}</span>
+                <span>RH</span>
+              </div>
+              <div className="absolute inset-0 grid place-items-center">
+                <div className="text-center">
+                  <div className="text-3xl font-black tracking-normal text-white/90">{generated.initials}</div>
+                  <div className="mt-2 max-w-[120px] text-[10px] font-bold uppercase leading-tight text-white/52">{PLATFORM_LABELS[game.platform]}</div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

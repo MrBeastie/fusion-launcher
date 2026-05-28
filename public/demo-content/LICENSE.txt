@@ -1,0 +1,9 @@
+RetroHydra Built-in Demo Content
+
+The files in this folder that are named retrohydra-smoke.* are first-party
+RetroHydra smoke-test assets generated for launcher validation.
+
+License: CC0-1.0
+
+These assets contain no commercial ROM, BIOS, firmware, keys, or third-party
+homebrew payloads.

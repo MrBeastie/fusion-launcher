@@ -13,7 +13,6 @@ interface UseGamepadOptions {
   setFocusedItemId: (id: string | null) => void;
   onActivate: (id: string) => void;
   onBack: () => void;
-  onSearch: () => void;
   onMenu: (id: string | null) => void;
 }
 
@@ -29,7 +28,6 @@ export function useGamepad({
   setFocusedItemId,
   onActivate,
   onBack,
-  onSearch,
   onMenu
 }: UseGamepadOptions) {
   useEffect(() => {
@@ -52,13 +50,12 @@ export function useGamepad({
       event.preventDefault();
       if (action === 'activate' && focusedItemId) onActivate(focusedItemId);
       if (action === 'back') onBack();
-      if (action === 'search') onSearch();
       if (action === 'menu') onMenu(focusedItemId);
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [focusedItemId, onActivate, onBack, onMenu, onSearch, setFocusedItemId]);
+  }, [focusedItemId, onActivate, onBack, onMenu, setFocusedItemId]);
 }
 
 function collectFocusTargets(): FocusTarget[] {

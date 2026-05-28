@@ -31,6 +31,12 @@ pub enum SourceUri {
         #[serde(rename = "sizeBytes")]
         size_bytes: Option<u64>,
     },
+    Bundled {
+        path: String,
+        sha256: String,
+        #[serde(rename = "sizeBytes")]
+        size_bytes: Option<u64>,
+    },
     Magnet {
         uri: String,
         #[serde(rename = "infoHash")]

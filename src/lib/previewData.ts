@@ -14,7 +14,8 @@ import type {
   TorrentDownloadRecord,
   TorrentStartReport,
   TorrentStatus,
-  TrustedExecutable
+  TrustedExecutable,
+  UpdateCheckReport
 } from '../types/repository.ts';
 
 const now = '2026-05-26T08:00:00.000Z';
@@ -78,8 +79,17 @@ export const previewApi = {
       contentHash: repository.contentHash ?? '0'.repeat(64)
     };
   },
+  async previewBuiltInDemoRepository(): Promise<RepositoryPreview> {
+    return previewApi.previewRepository('retrohydra://builtin/demo-repository.json');
+  },
   async connectRepository(_url = repository.url): Promise<RepositorySummary> {
     return repository;
+  },
+  async connectBuiltInDemoRepository(): Promise<RepositorySummary> {
+    return {
+      ...repository,
+      url: 'retrohydra://builtin/demo-repository.json'
+    };
   },
   async refreshRepository(_repositoryId = repository.id): Promise<RepositorySummary> {
     return { ...repository, lastRefreshedAt: new Date().toISOString() };
@@ -170,9 +180,16 @@ export const previewApi = {
   async startGameDownload(gameId: string): Promise<GameDownloadStartReport> {
     const game = catalog.find((item) => item.id === gameId);
     const source = game?.downloads[0];
-    if (source?.kind === 'http') {
+    if (source?.kind === 'http' || source?.kind === 'bundled') {
       const record = downloadRecord(gameId, 'game');
-      return { gameId, sourceKind: 'http', saveDir: record.localPath ?? `${downloadRoot}/${gameId}`, record, torrent: null };
+      const torrentRecord = directDownloadRecord(
+        gameId,
+        source.kind,
+        record.localPath ?? `${downloadRoot}/${gameId}`,
+        source.sizeBytes ?? 24_592
+      );
+      downloads = [torrentRecord, ...downloads.filter((item) => item.gameId !== gameId)];
+      return { gameId, sourceKind: source.kind, saveDir: torrentRecord.saveDir, record, torrent: torrentRecord };
     }
     const torrent = await previewApi.startMagnetDownload(
       gameId,
@@ -291,6 +308,18 @@ export const previewApi = {
       resolvedGamePath: gamePath,
       args: [emulator?.launchArgsTemplate ?? '{game_path}', game.expectedExtensions.join(',')]
     };
+  },
+  async checkAppUpdate(): Promise<UpdateCheckReport> {
+    return {
+      available: false,
+      currentVersion: '0.1.0-preview',
+      version: null,
+      date: null,
+      body: null
+    };
+  },
+  async installAppUpdate(): Promise<void> {
+    return undefined;
   }
 };
 
@@ -341,6 +370,32 @@ function torrent(
     createdAt: now,
     updatedAt: now,
     completedAt: status === 'completed' ? now : null
+  };
+}
+
+function directDownloadRecord(
+  gameId: string,
+  sourceKind: 'http' | 'bundled',
+  saveDir: string,
+  totalBytes: number
+): TorrentDownloadRecord {
+  const timestamp = new Date().toISOString();
+  return {
+    gameId,
+    magnetUri: `direct:${sourceKind}`,
+    saveDir,
+    status: 'completed',
+    progressPercent: 100,
+    downloadedBytes: totalBytes,
+    totalBytes,
+    downloadSpeedBytesPerSec: 0,
+    uploadSpeedBytesPerSec: 0,
+    peersCount: 0,
+    torrentId: null,
+    errorMessage: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    completedAt: timestamp
   };
 }
 

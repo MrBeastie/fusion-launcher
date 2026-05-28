@@ -1,12 +1,12 @@
 import type { CatalogGame } from '../types/repository.ts';
 
 const PALETTES = [
-  ['#151828', '#4f46e5', '#22d3ee'],
-  ['#17131f', '#8b5cf6', '#f59e0b'],
-  ['#101821', '#10b981', '#38bdf8'],
-  ['#1a1018', '#ef4444', '#f97316'],
-  ['#121723', '#64748b', '#a78bfa'],
-  ['#11151c', '#14b8a6', '#f43f5e']
+  ['#101512', '#3f5f48', '#d6b36a'],
+  ['#141118', '#7c3aed', '#d8d3c8'],
+  ['#11171a', '#2f7b73', '#c9a65c'],
+  ['#181211', '#9d3d36', '#d6c8a8'],
+  ['#12131a', '#46516a', '#b59f72'],
+  ['#101519', '#1f7a8c', '#d2b17b']
 ] as const;
 
 export interface GeneratedGameArt {
@@ -29,15 +29,15 @@ export function createGameArt(game: Pick<CatalogGame, 'id' | 'title' | 'platform
     .join('') || game.platform.slice(0, 3).toUpperCase();
 
   const posterPattern = [
-    `radial-gradient(circle at ${offset}% 18%, ${palette[2]}66, transparent 26%)`,
-    `radial-gradient(circle at 88% ${offset + 12}%, ${palette[1]}88, transparent 34%)`,
-    `linear-gradient(${angle}deg, ${palette[0]}, #050609 68%)`
+    `linear-gradient(${angle}deg, ${palette[1]}cc 0%, transparent 38%)`,
+    `linear-gradient(${angle + 62}deg, transparent 12%, ${palette[2]}88 48%, transparent 76%)`,
+    `linear-gradient(180deg, ${palette[0]}, #050609 88%)`
   ].join(', ');
 
   const heroPattern = [
-    `radial-gradient(circle at 70% 22%, ${palette[2]}55, transparent 24%)`,
-    `radial-gradient(circle at 84% 64%, ${palette[1]}7a, transparent 34%)`,
-    `linear-gradient(100deg, #050609 0%, ${palette[0]} 42%, #050609 100%)`
+    `linear-gradient(96deg, #050609 0%, ${palette[0]} 39%, transparent 66%)`,
+    `linear-gradient(24deg, transparent 30%, ${palette[1]}66 58%, ${palette[2]}33 86%)`,
+    `linear-gradient(180deg, #141712 0%, #070806 100%)`
   ].join(', ');
 
   return {

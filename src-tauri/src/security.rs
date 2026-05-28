@@ -49,6 +49,18 @@ pub fn validate_repository_schema(
     repo: &RepositorySchema,
     allow_dev_http: bool,
 ) -> Result<(), String> {
+    validate_repository_schema_internal(repo, allow_dev_http, false)
+}
+
+pub fn validate_builtin_repository_schema(repo: &RepositorySchema) -> Result<(), String> {
+    validate_repository_schema_internal(repo, false, true)
+}
+
+fn validate_repository_schema_internal(
+    repo: &RepositorySchema,
+    allow_dev_http: bool,
+    allow_bundled_sources: bool,
+) -> Result<(), String> {
     if repo.metadata.schema_version != 2 {
         return Err("Unsupported repository schemaVersion. Expected 2.".to_string());
     }
@@ -76,7 +88,7 @@ pub fn validate_repository_schema(
         if !asset_ids.insert(asset.id.as_str()) {
             return Err(format!("Duplicate asset id: {}", asset.id));
         }
-        validate_sources(&asset.sources, allow_dev_http)?;
+        validate_sources(&asset.sources, allow_dev_http, allow_bundled_sources)?;
         if let Some(hint) = &asset.install_hint {
             if let Some(relative_path) = &hint.relative_path {
                 validate_relative_path(relative_path)?;
@@ -104,7 +116,7 @@ pub fn validate_repository_schema(
         if !game_ids.insert(game.id.as_str()) {
             return Err(format!("Duplicate game id: {}", game.id));
         }
-        validate_sources(&game.downloads, allow_dev_http)?;
+        validate_sources(&game.downloads, allow_dev_http, allow_bundled_sources)?;
         if let Some(url) = &game.cover_image_url {
             validate_http_url(
                 &Url::parse(url).map_err(|error| format!("Invalid coverImageUrl: {error}"))?,
@@ -167,7 +179,11 @@ fn validate_expected_extension(extension: &str) -> Result<(), String> {
     ))
 }
 
-fn validate_sources(sources: &[SourceUri], allow_dev_http: bool) -> Result<(), String> {
+fn validate_sources(
+    sources: &[SourceUri],
+    allow_dev_http: bool,
+    allow_bundled_sources: bool,
+) -> Result<(), String> {
     if sources.is_empty() {
         return Err("Each asset or game must include at least one source.".to_string());
     }
@@ -181,6 +197,16 @@ fn validate_sources(sources: &[SourceUri], allow_dev_http: bool) -> Result<(), S
                 )?;
                 validate_sha256(sha256)?;
             }
+            SourceUri::Bundled { path, sha256, .. } => {
+                if !allow_bundled_sources {
+                    return Err(
+                        "Bundled sources are only allowed in the built-in demo repository."
+                            .to_string(),
+                    );
+                }
+                validate_bundled_path(path)?;
+                validate_sha256(sha256)?;
+            }
             SourceUri::Magnet { uri, .. } => {
                 if !uri.starts_with("magnet:?") {
                     return Err("Magnet sources must start with magnet:?".to_string());
@@ -192,6 +218,24 @@ fn validate_sources(sources: &[SourceUri], allow_dev_http: bool) -> Result<(), S
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+pub fn validate_bundled_path(value: &str) -> Result<(), String> {
+    validate_relative_path(value)?;
+    if value.contains('\\') {
+        return Err("Bundled source paths must use forward slashes.".to_string());
+    }
+    if value.starts_with("./")
+        || value.ends_with('/')
+        || value.contains("//")
+        || value
+            .split('/')
+            .any(|segment| segment == "." || segment.is_empty())
+    {
+        return Err("Bundled source paths must be normalized relative paths.".to_string());
     }
 
     Ok(())
@@ -280,5 +324,51 @@ mod tests {
         assert!(validate_relative_path("bios/scph1001.bin").is_ok());
         assert!(validate_relative_path("../secret.bin").is_err());
         assert!(validate_relative_path("/secret.bin").is_err());
+    }
+
+    #[test]
+    fn rejects_external_bundled_sources() {
+        let repo = RepositorySchema {
+            metadata: crate::schema::RepositoryMetadata {
+                id: "repo".to_string(),
+                name: "Repo".to_string(),
+                version: "1".to_string(),
+                schema_version: 2,
+                maintainer: None,
+                homepage_url: None,
+                license: None,
+                trust_level: None,
+                content_hash: None,
+                updated_at: None,
+            },
+            system_files: vec![],
+            catalog: vec![crate::schema::RepositoryGame {
+                id: "game".to_string(),
+                platform: "nes".to_string(),
+                title: "Game".to_string(),
+                description: None,
+                cover_image_url: None,
+                trailer_url: None,
+                downloads: vec![SourceUri::Bundled {
+                    path: "demo-content/game.nes".to_string(),
+                    sha256: "a".repeat(64),
+                    size_bytes: Some(16),
+                }],
+                expected_extensions: vec![".nes".to_string()],
+                required_system_file_ids: vec![],
+            }],
+        };
+
+        assert!(validate_repository_schema(&repo, false).is_err());
+        assert!(validate_builtin_repository_schema(&repo).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_normalized_bundled_paths() {
+        assert!(validate_bundled_path("demo-content/game.nes").is_ok());
+        assert!(validate_bundled_path("./demo-content/game.nes").is_err());
+        assert!(validate_bundled_path("demo-content\\game.nes").is_err());
+        assert!(validate_bundled_path("demo-content//game.nes").is_err());
+        assert!(validate_bundled_path("../game.nes").is_err());
     }
 }

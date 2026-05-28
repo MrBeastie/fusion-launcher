@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { CheckCircle2, Download, FolderOpen, Loader2, ShieldAlert } from 'lucide-react';
+import { CheckCircle2, Download, FolderOpen, Link2, Loader2, ShieldAlert } from 'lucide-react';
 import { api } from '@/lib/api';
 import { isTauriRuntime } from '@/lib/runtime';
 import {
@@ -13,11 +13,6 @@ import {
   type MvpPlatform
 } from '@/types/platform';
 import type { CatalogGame, OnboardingState, RepositoryPreview } from '@/types/repository';
-
-const OFFICIAL_DEMO_REPO =
-  process.env.NODE_ENV === 'production'
-    ? 'https://cdn.retrohydra.app/repos/demo-v1.json'
-    : 'http://localhost:3000/demo-repository.json';
 
 interface OnboardingWizardProps {
   state: OnboardingState | null;
@@ -32,9 +27,10 @@ export function OnboardingWizard({
   initialMessage,
   onReload
 }: OnboardingWizardProps) {
-  const [repoUrl, setRepoUrl] = useState(OFFICIAL_DEMO_REPO);
+  const [repoUrl, setRepoUrl] = useState('');
   const [preview, setPreview] = useState<RepositoryPreview | null>(null);
-  const [platform, setPlatform] = useState<MvpPlatform>('ps1');
+  const [builtInPreview, setBuiltInPreview] = useState<RepositoryPreview | null>(null);
+  const [platform, setPlatform] = useState<MvpPlatform>('nes');
   const [emulatorPath, setEmulatorPath] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(initialMessage);
@@ -52,6 +48,31 @@ export function OnboardingWizard({
     try {
       const nextPreview = await api.previewRepository(repoUrl.trim());
       setPreview(nextPreview);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const previewBuiltInRepository = async () => {
+    setBusy('builtin-preview');
+    setMessage(null);
+    try {
+      setBuiltInPreview(await api.previewBuiltInDemoRepository());
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const connectBuiltInRepository = async () => {
+    setBusy('builtin-connect');
+    setMessage(null);
+    try {
+      await api.connectBuiltInDemoRepository();
+      await onReload();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -140,6 +161,40 @@ export function OnboardingWizard({
 
         <div className="grid gap-4 md:grid-cols-3">
           <StepCard active={currentStep === 'addRepository'} done={Boolean(state?.repositoriesConfigured)} title="1. Repository">
+            <div className="border-b border-white/10 pb-4">
+              <div className="text-sm font-bold">RetroHydra Built-in Demo</div>
+              <div className="mt-1 text-xs leading-5 text-white/52">
+                Offline first-party NES smoke content for setup and health checks.
+              </div>
+              {builtInPreview && (
+                <div className="mt-3 text-xs leading-5 text-white/62">
+                  <div className="font-bold text-white">{builtInPreview.name}</div>
+                  <div>{builtInPreview.catalogCount} game / {builtInPreview.systemFileCount} system files</div>
+                  <div>Trust: {builtInPreview.trustLevel}</div>
+                </div>
+              )}
+              <div className="mt-3 flex gap-2">
+                <button onClick={connectBuiltInRepository} disabled={busy !== null} className="rh-primary-action">
+                  {busy === 'builtin-connect' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                  Use built-in demo
+                </button>
+                <button onClick={previewBuiltInRepository} disabled={busy !== null} className="rh-mini-action">
+                  {busy === 'builtin-preview' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+                  Preview
+                </button>
+              </div>
+            </div>
+
+            <div className="my-4 flex items-center gap-3 text-[10px] font-black uppercase tracking-[0.16em] text-white/32">
+              <span className="h-px flex-1 bg-white/10" />
+              Add community repository
+              <span className="h-px flex-1 bg-white/10" />
+            </div>
+
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-white/52">
+              <Link2 className="h-3.5 w-3.5" />
+              Repository URL
+            </div>
             <input
               value={repoUrl}
               onChange={(event) => {
@@ -158,11 +213,11 @@ export function OnboardingWizard({
               </div>
             )}
             <div className="mt-3 flex gap-2">
-              <button onClick={previewRepository} disabled={busy !== null} className="rh-mini-action">
+              <button onClick={previewRepository} disabled={busy !== null || !repoUrl.trim()} className="rh-mini-action">
                 {busy === 'preview' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="h-3.5 w-3.5" />}
                 Preview
               </button>
-              <button onClick={connectRepository} disabled={busy !== null || !repoUrl.trim()} className="rh-primary-action">
+              <button onClick={connectRepository} disabled={busy !== null || !repoUrl.trim()} className="rh-mini-action">
                 Connect
               </button>
             </div>

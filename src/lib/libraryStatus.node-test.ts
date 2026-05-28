@@ -74,6 +74,38 @@ describe('library status derivation', () => {
     assert.equal(item.statusLabel, 'Ready to Play');
   });
 
+  it('marks a completed direct download as ready to play', () => {
+    const item = buildGameLibraryItem(
+      {
+        ...game,
+        downloads: [{
+          kind: 'bundled',
+          path: 'demo-content/retrohydra-smoke.nes',
+          sha256: 'a'.repeat(64),
+          sizeBytes: 24592
+        }]
+      },
+      status({
+        download: download({
+          magnetUri: 'direct:bundled',
+          saveDir: 'F:/Games/retrohydra-smoke.nes',
+          status: 'completed',
+          progressPercent: 100,
+          downloadedBytes: 24592,
+          totalBytes: 24592,
+          peersCount: 0,
+          torrentId: null,
+          completedAt: '2026-05-23T00:05:00Z'
+        })
+      }),
+      configuredSettings
+    );
+
+    assert.equal(item.installed, true);
+    assert.equal(item.readyToPlay, true);
+    assert.equal(item.primaryAction, 'play');
+  });
+
   it('marks an installed game without an emulator as missing requirements', () => {
     const item = buildGameLibraryItem(game, status({ installed: true }), emptySettings);
 

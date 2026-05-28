@@ -1,0 +1,137 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build signed NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc
+
+      - name: Prepare updater release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $bundleRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $assetRoot = "release-assets"
+
+          New-Item -ItemType Directory -Force -Path $assetRoot | Out-Null
+
+          $exe = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*_x64-setup.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $zip = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.nsis.zip" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $sig = Get-ChildItem -Path $bundleRoot -Recurse -Filter "*.nsis.zip.sig" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $exe) { throw "NSIS installer was not found in $bundleRoot" }
+          if (-not $zip) { throw "Updater NSIS zip was not found in $bundleRoot" }
+          if (-not $sig) { throw "Updater signature was not found in $bundleRoot" }
+
+          $exeOut = Join-Path $assetRoot "RetroHydra_${version}_x64-setup.exe"
+          $zipOut = Join-Path $assetRoot "RetroHydra_${version}_x64-setup.nsis.zip"
+          $sigOut = Join-Path $assetRoot "RetroHydra_${version}_x64-setup.nsis.zip.sig"
+
+          Copy-Item -LiteralPath $exe.FullName -Destination $exeOut -Force
+          Copy-Item -LiteralPath $zip.FullName -Destination $zipOut -Force
+          Copy-Item -LiteralPath $sig.FullName -Destination $sigOut -Force
+
+          $notes = ""
+          gh release view $tag --json body --jq ".body" 2>$null | Tee-Object -Variable existingNotes | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            $notes = ($existingNotes -join "`n").Trim()
+          }
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $tagNotes = (git for-each-ref "refs/tags/$tag" --format="%(contents)" | Out-String).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($tagNotes)) {
+              $notes = $tagNotes
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($notes) -and (Test-Path -LiteralPath "CHANGELOG.md")) {
+            $notes = (Get-Content -LiteralPath "CHANGELOG.md" -Raw).Trim()
+          }
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = "RetroHydra $tag"
+          }
+
+          $signature = (Get-Content -LiteralPath $sigOut -Raw).Trim()
+          $latest = [ordered]@{
+            version = $tag
+            notes = $notes
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = "https://github.com/MrBeastie/RetroHydra/releases/download/$tag/RetroHydra_${version}_x64-setup.nsis.zip"
+              }
+            }
+          }
+
+          $latest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $assetRoot "latest.json") -Encoding utf8
+
+      - name: Upload GitHub Release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $notes = "RetroHydra $tag"
+          $tagNotes = (git for-each-ref "refs/tags/$tag" --format="%(contents)" | Out-String).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($tagNotes)) {
+            $notes = $tagNotes
+          }
+          if (Test-Path -LiteralPath "CHANGELOG.md") {
+            $changelog = (Get-Content -LiteralPath "CHANGELOG.md" -Raw).Trim()
+            if ([string]::IsNullOrWhiteSpace($notes) -or $notes -eq "RetroHydra $tag") {
+              $notes = $changelog
+            }
+          }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --title "RetroHydra $tag" --notes $notes
+          }
+
+          gh release upload $tag `
+            "release-assets/RetroHydra_${version}_x64-setup.exe" `
+            "release-assets/RetroHydra_${version}_x64-setup.nsis.zip" `
+            "release-assets/RetroHydra_${version}_x64-setup.nsis.zip.sig" `
+            "release-assets/latest.json" `
+            --clobber

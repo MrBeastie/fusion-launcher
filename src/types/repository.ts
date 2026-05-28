@@ -23,6 +23,7 @@ export interface RepositorySchema {
 
 export type SourceUri =
   | { kind: 'http'; url: string; sha256: string; sizeBytes?: number }
+  | { kind: 'bundled'; path: string; sha256: string; sizeBytes?: number }
   | { kind: 'magnet'; uri: string; infoHash?: string; sizeBytes?: number }
   | { kind: 'user_provided'; instructions?: string; sha256?: string; sizeBytes?: number };
 
@@ -152,7 +153,7 @@ export interface DownloadRecord {
 
 export interface GameDownloadStartReport {
   gameId: string;
-  sourceKind: 'http' | 'magnet';
+  sourceKind: 'http' | 'bundled' | 'magnet';
   saveDir: string;
   record?: DownloadRecord | null;
   torrent?: TorrentDownloadRecord | null;
@@ -304,11 +305,35 @@ export interface DiagnosticsBundle {
   logs: string[];
 }
 
+export type UpdateCheckErrorKind = 'endpointUnreachable' | 'parseError' | 'signatureInvalid';
+
+export interface UpdateCheckError {
+  kind: UpdateCheckErrorKind;
+  message?: string;
+}
+
+export interface UpdateCheckReport {
+  available: boolean;
+  currentVersion: string;
+  version?: string | null;
+  date?: string | null;
+  body?: string | null;
+}
+
 export const sourceUriSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('http'),
     url: z.string().url(),
     sha256: z.string().regex(sha256Pattern, 'HTTP sources must include a lowercase or uppercase SHA-256 hash'),
+    sizeBytes: z.number().int().positive().optional()
+  }),
+  z.object({
+    kind: z.literal('bundled'),
+    path: z.string()
+      .trim()
+      .min(1)
+      .regex(/^(?!\.?\/)(?!.*\/\/)(?!.*\\)(?!.*(?:^|\/)\.\.?(?:\/|$)).+$/, 'Bundled paths must be normalized relative paths'),
+    sha256: z.string().regex(sha256Pattern, 'Bundled sources must include a lowercase or uppercase SHA-256 hash'),
     sizeBytes: z.number().int().positive().optional()
   }),
   z.object({

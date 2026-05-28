@@ -17,14 +17,17 @@ import type {
   TorrentDownloadRecord,
   TorrentStartReport,
   TorrentStatus,
-  TrustedExecutable
+  TrustedExecutable,
+  UpdateCheckReport
 } from '@/types/repository';
 
 type PreviewHandler = (args: Record<string, unknown>) => Promise<unknown>;
 
 const previewHandlers: Record<string, PreviewHandler> = {
   preview_repository: ({ url }) => previewApi.previewRepository(String(url ?? 'preview://retrohydra')),
+  preview_builtin_demo_repository: () => previewApi.previewBuiltInDemoRepository(),
   connect_repository: ({ url }) => previewApi.connectRepository(String(url ?? 'preview://retrohydra')),
+  connect_builtin_demo_repository: () => previewApi.connectBuiltInDemoRepository(),
   refresh_repository: ({ repositoryId }) => previewApi.refreshRepository(String(repositoryId ?? '')),
   get_onboarding_state: () => previewApi.getOnboardingState(),
   list_repositories: () => previewApi.listRepositories(),
@@ -65,7 +68,9 @@ const previewHandlers: Record<string, PreviewHandler> = {
   pause_download: ({ gameId }) => previewApi.pauseDownload(String(gameId ?? '')),
   resume_download: ({ gameId }) => previewApi.resumeDownload(String(gameId ?? '')),
   cancel_download: ({ gameId }) => previewApi.cancelDownload(String(gameId ?? '')),
-  launch_game: ({ gameId }) => previewApi.launchGame(String(gameId ?? ''))
+  launch_game: ({ gameId }) => previewApi.launchGame(String(gameId ?? '')),
+  check_app_update: () => previewApi.checkAppUpdate(),
+  install_app_update: () => previewApi.installAppUpdate()
 };
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -86,8 +91,14 @@ export const api = {
   previewRepository(url: string) {
     return call<RepositoryPreview>('preview_repository', { url });
   },
+  previewBuiltInDemoRepository() {
+    return call<RepositoryPreview>('preview_builtin_demo_repository');
+  },
   connectRepository(url: string) {
     return call<RepositorySummary>('connect_repository', { url });
+  },
+  connectBuiltInDemoRepository() {
+    return call<RepositorySummary>('connect_builtin_demo_repository');
   },
   refreshRepository(repositoryId: string) {
     return call<RepositorySummary>('refresh_repository', { repositoryId });
@@ -187,5 +198,11 @@ export const api = {
   },
   launchGame(gameId: string) {
     return call<LaunchReport>('launch_game', { gameId });
+  },
+  checkAppUpdate() {
+    return call<UpdateCheckReport>('check_app_update');
+  },
+  installAppUpdate() {
+    return call<void>('install_app_update');
   }
 };

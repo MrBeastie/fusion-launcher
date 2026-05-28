@@ -7,8 +7,7 @@ import {
   type LucideIcon,
   MoreHorizontal,
   Play,
-  RotateCw,
-  Star
+  RotateCw
 } from 'lucide-react';
 import { GameArt, GamePoster } from './GamePoster';
 import { PLATFORM_LABELS } from '../../types/platform.ts';
@@ -34,6 +33,8 @@ export function HeroPanel({
   onOpenDetails,
   onFocus
 }: HeroPanelProps) {
+  const continueRailItems = mergeRailItems(continueItems, recentItems, 8);
+
   if (!heroItem) {
     return (
       <section className="rh-hero-panel grid place-items-center">
@@ -55,10 +56,10 @@ export function HeroPanel({
 
       <div className="rh-hero-content">
         <div className="rh-hero-kicker">
-          <span className="rounded border border-white/18 px-2 py-1">{heroItem.game.platform}</span>
+          <span className="rh-platform-chip">{heroItem.game.platform}</span>
+          <span>MVP Demo</span>
+          <span>-</span>
           <span>{PLATFORM_LABELS[heroItem.game.platform]}</span>
-          <span>/</span>
-          <span>{heroItem.game.repositoryName}</span>
         </div>
         <h1 className="rh-hero-title">
           {heroItem.game.title}
@@ -92,12 +93,11 @@ export function HeroPanel({
         <div className="rh-hero-meta">
           <span>Status: {heroItem.statusLabel}</span>
           <span>Progress: {heroItem.progressPercent.toFixed(0)}%</span>
-          <span>Repository: {heroItem.game.repositoryName}</span>
         </div>
 
         <MiniRail
           title="Continue Playing"
-          items={continueItems.length > 0 ? continueItems : recentItems.slice(0, 6)}
+          items={continueRailItems}
           zone="continue"
           onOpenDetails={onOpenDetails}
           onPrimaryAction={onPrimaryAction}
@@ -127,9 +127,8 @@ export function CollectionsPanel({
 }) {
   const byPlatform = new Map<string, number>();
   items.forEach((item) => byPlatform.set(item.game.platform, (byPlatform.get(item.game.platform) ?? 0) + 1));
-  const collectionCards = [
+  const collectionCards: Array<{ label: string; count: number; icon: LucideIcon; active?: boolean }> = [
     { label: 'All Games', count: items.length, icon: FolderHeart, active: true },
-    { label: 'Favorites', count: items.filter((item) => item.readyToPlay).length, icon: Star },
     ...Array.from(byPlatform.entries()).slice(0, 4).map(([platform, count]) => ({
       label: PLATFORM_LABELS[platform as keyof typeof PLATFORM_LABELS] ?? platform,
       count,
@@ -200,6 +199,20 @@ function MiniRail({
       </div>
     </div>
   );
+}
+
+function mergeRailItems(primaryItems: GameLibraryItem[], fallbackItems: GameLibraryItem[], limit: number) {
+  const seen = new Set<string>();
+  const result: GameLibraryItem[] = [];
+
+  for (const item of [...primaryItems, ...fallbackItems]) {
+    if (seen.has(item.game.id)) continue;
+    seen.add(item.game.id);
+    result.push(item);
+    if (result.length >= limit) break;
+  }
+
+  return result;
 }
 
 function PanelTitle({ icon: Icon, title }: { icon: LucideIcon; title: string }) {

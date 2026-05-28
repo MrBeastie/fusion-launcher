@@ -8,14 +8,15 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::builtin_demo;
 use crate::downloads::{
     destination_for_source, download_source_to_file, file_name_for_source, hash_file,
 };
 use crate::logging;
 use crate::platform::{default_launch_args_template, is_mvp_platform, MVP_PLATFORM_CONFIGS};
 use crate::schema::{
-    AssetView, CatalogGameView, DiagnosticsBundle, DownloadRecord, GameDownloadStartReport,
-    HealthCheckItem, HealthReport, EmulatorConfig, InstallTarget, LibraryGameStatus,
+    AssetView, CatalogGameView, DiagnosticsBundle, DownloadRecord, EmulatorConfig,
+    GameDownloadStartReport, HealthCheckItem, HealthReport, InstallTarget, LibraryGameStatus,
     OnboardingState, RepositoryPreview, RepositorySchema, RepositorySummary, RequirementItem,
     RequirementsReport, SourceUri, TrustedExecutable,
 };
@@ -34,7 +35,27 @@ pub async fn preview_repository(
     logging::log_event(
         &state.data_dir,
         "repository_previewed",
-        &[("url", url.as_str()), ("repository_id", preview.id.as_str())],
+        &[
+            ("url", url.as_str()),
+            ("repository_id", preview.id.as_str()),
+        ],
+    );
+    Ok(preview)
+}
+
+#[tauri::command]
+pub fn preview_builtin_demo_repository(
+    state: State<'_, AppState>,
+) -> Result<RepositoryPreview, String> {
+    let repo = load_builtin_demo_repository()?;
+    let preview = build_repository_preview(builtin_demo::BUILTIN_DEMO_REPOSITORY_URL, &repo);
+    logging::log_event(
+        &state.data_dir,
+        "repository_previewed",
+        &[
+            ("url", builtin_demo::BUILTIN_DEMO_REPOSITORY_URL),
+            ("repository_id", preview.id.as_str()),
+        ],
     );
     Ok(preview)
 }
@@ -52,7 +73,28 @@ pub async fn connect_repository(
     logging::log_event(
         &state.data_dir,
         "repository_connected",
-        &[("url", url.as_str()), ("repository_id", summary.id.as_str())],
+        &[
+            ("url", url.as_str()),
+            ("repository_id", summary.id.as_str()),
+        ],
+    );
+    Ok(summary)
+}
+
+#[tauri::command]
+pub fn connect_builtin_demo_repository(
+    state: State<'_, AppState>,
+) -> Result<RepositorySummary, String> {
+    let repo = load_builtin_demo_repository()?;
+    let mut store = lock_store(&state)?;
+    let summary = store.store_repository(builtin_demo::BUILTIN_DEMO_REPOSITORY_URL, &repo)?;
+    logging::log_event(
+        &state.data_dir,
+        "repository_connected",
+        &[
+            ("url", builtin_demo::BUILTIN_DEMO_REPOSITORY_URL),
+            ("repository_id", summary.id.as_str()),
+        ],
     );
     Ok(summary)
 }
@@ -68,14 +110,21 @@ pub async fn refresh_repository(
             .get_repository_url(&repository_id)?
             .ok_or_else(|| format!("Unknown repository: {repository_id}"))?
     };
-    let allow_dev_http = cfg!(debug_assertions);
-    let repo = fetch_repository_schema(&url, allow_dev_http).await?;
+    let repo = if builtin_demo::is_builtin_repository_url(&url) {
+        load_builtin_demo_repository()?
+    } else {
+        let allow_dev_http = cfg!(debug_assertions);
+        fetch_repository_schema(&url, allow_dev_http).await?
+    };
     let mut store = lock_store(&state)?;
     let summary = store.store_repository(&url, &repo)?;
     logging::log_event(
         &state.data_dir,
         "repository_refreshed",
-        &[("url", url.as_str()), ("repository_id", summary.id.as_str())],
+        &[
+            ("url", url.as_str()),
+            ("repository_id", summary.id.as_str()),
+        ],
     );
     Ok(summary)
 }
@@ -349,13 +398,15 @@ pub async fn download_game(
     match download_source_to_file(source, &destination).await {
         Ok(file) => {
             let local_path = file.path.to_string_lossy().to_string();
-            lock_store(&state)?.record_download(
+            let total_bytes = source_size_bytes(source).unwrap_or_else(|| file_size(&file.path));
+            let (record, _) = lock_store(&state)?.record_direct_game_download_completed(
                 &game.id,
-                "game",
-                Some(&local_path),
-                Some(&file.sha256),
-                None,
-            )
+                direct_source_kind(source),
+                &local_path,
+                &file.sha256,
+                total_bytes,
+            )?;
+            Ok(record)
         }
         Err(error) => {
             let _ = lock_store(&state)?.record_download(&game.id, "game", None, None, Some(&error));
@@ -408,7 +459,7 @@ pub async fn start_game_download(
                 torrent: state.torrents.get_game_download(&game_id)?,
             })
         }
-        SourceUri::Http { size_bytes, .. } => {
+        SourceUri::Http { size_bytes, .. } | SourceUri::Bundled { size_bytes, .. } => {
             preflight_disk_space(&download_root, *size_bytes)?;
             let destination = destination_for_source(
                 &download_root,
@@ -419,28 +470,34 @@ pub async fn start_game_download(
             );
             let file = download_source_to_file(source, &destination).await?;
             let local_path = file.path.to_string_lossy().to_string();
-            let record = lock_store(&state)?.record_download(
+            let total_bytes = size_bytes.unwrap_or_else(|| file_size(&file.path));
+            let (record, torrent) = lock_store(&state)?.record_direct_game_download_completed(
                 &game.id,
-                "game",
-                Some(&local_path),
-                Some(&file.sha256),
-                None,
+                direct_source_kind(source),
+                &local_path,
+                &file.sha256,
+                total_bytes,
             )?;
-            emit_http_download_completed(&app, &game.id, &local_path, size_bytes.unwrap_or(0))?;
+            emit_direct_download_completed(&app, &game.id, &local_path, total_bytes)?;
             logging::log_event(
                 &state.data_dir,
                 "game_download_completed",
-                &[("game_id", game.id.as_str()), ("source", "http")],
+                &[
+                    ("game_id", game.id.as_str()),
+                    ("source", direct_source_kind(source)),
+                ],
             );
             Ok(GameDownloadStartReport {
                 game_id: game.id,
-                source_kind: "http".to_string(),
+                source_kind: direct_source_kind(source).to_string(),
                 save_dir: local_path,
                 record: Some(record),
-                torrent: None,
+                torrent: Some(torrent),
             })
         }
-        SourceUri::UserProvided { .. } => Err("Game downloads cannot be user-provided.".to_string()),
+        SourceUri::UserProvided { .. } => {
+            Err("Game downloads cannot be user-provided.".to_string())
+        }
     }
 }
 
@@ -915,9 +972,34 @@ fn inspect_asset_installation(
 fn expected_asset_sha256(asset: &AssetView) -> Option<&str> {
     asset.sources.iter().find_map(|source| match source {
         SourceUri::Http { sha256, .. } => Some(sha256.as_str()),
+        SourceUri::Bundled { sha256, .. } => Some(sha256.as_str()),
         SourceUri::Magnet { .. } => None,
         SourceUri::UserProvided { sha256, .. } => sha256.as_deref(),
     })
+}
+
+fn source_size_bytes(source: &SourceUri) -> Option<u64> {
+    match source {
+        SourceUri::Http { size_bytes, .. }
+        | SourceUri::Bundled { size_bytes, .. }
+        | SourceUri::Magnet { size_bytes, .. }
+        | SourceUri::UserProvided { size_bytes, .. } => *size_bytes,
+    }
+}
+
+fn direct_source_kind(source: &SourceUri) -> &'static str {
+    match source {
+        SourceUri::Bundled { .. } => "bundled",
+        SourceUri::Http { .. } => "http",
+        SourceUri::Magnet { .. } => "magnet",
+        SourceUri::UserProvided { .. } => "user_provided",
+    }
+}
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn blocked_asset(target_path: Option<String>, message: impl Into<String>) -> BlockedAssetTarget {
@@ -1007,6 +1089,12 @@ async fn fetch_repository_schema(
     Ok(repo)
 }
 
+fn load_builtin_demo_repository() -> Result<RepositorySchema, String> {
+    let repo = builtin_demo::repository_schema()?;
+    builtin_demo::verify_embedded_assets(&repo)?;
+    Ok(repo)
+}
+
 fn build_repository_preview(url: &str, repo: &RepositorySchema) -> RepositoryPreview {
     let raw_json = serde_json::to_vec(repo).unwrap_or_default();
     let content_hash = repo
@@ -1060,7 +1148,7 @@ fn preflight_disk_space(root: &Path, needed_bytes: Option<u64>) -> Result<(), St
     Ok(())
 }
 
-fn emit_http_download_completed(
+fn emit_direct_download_completed(
     app: &AppHandle,
     game_id: &str,
     save_dir: &str,
@@ -1100,11 +1188,12 @@ fn build_health_report(state: &State<'_, AppState>) -> Result<HealthReport, Stri
     let emulators = MVP_PLATFORM_CONFIGS
         .iter()
         .map(|platform| {
-            let config = configs
-                .iter()
-                .find(|config| config.platform == platform.id);
+            let config = configs.iter().find(|config| config.platform == platform.id);
             let path = config.and_then(|config| config.exe_path.clone());
-            let status = match path.as_deref().map(|path| validate_emulator_status(Some(path))) {
+            let status = match path
+                .as_deref()
+                .map(|path| validate_emulator_status(Some(path)))
+            {
                 Some("valid") => "ready",
                 Some("missing") => "missing",
                 _ => "missing",
@@ -1129,7 +1218,10 @@ fn build_health_report(state: &State<'_, AppState>) -> Result<HealthReport, Stri
         .collect::<Vec<_>>();
 
     for game in &catalog {
-        if let Some(download) = downloads.iter().find(|download| download.subject_id == game.id) {
+        if let Some(download) = downloads
+            .iter()
+            .find(|download| download.subject_id == game.id)
+        {
             let path = download.local_path.clone().unwrap_or_default();
             let game_status = check_game_file_health(&path, &game.expected_extensions);
             game_files.push(HealthCheckItem {
@@ -1172,12 +1264,14 @@ fn build_health_report(state: &State<'_, AppState>) -> Result<HealthReport, Stri
                 }
                 .to_string(),
                 message: item.message.or_else(|| item.target_path.clone()),
-                action: Some(match item.status.as_str() {
-                    "corrupt" | "error" => "redownloadAsset",
-                    "ready" if !item.trusted => "trustExecutable",
-                    _ => "openTargetFolder",
-                }
-                .to_string()),
+                action: Some(
+                    match item.status.as_str() {
+                        "corrupt" | "error" => "redownloadAsset",
+                        "ready" if !item.trusted => "trustExecutable",
+                        _ => "openTargetFolder",
+                    }
+                    .to_string(),
+                ),
                 path: item.target_path,
             });
         }
@@ -1223,7 +1317,10 @@ fn build_health_report(state: &State<'_, AppState>) -> Result<HealthReport, Stri
 
 fn check_game_file_health(path: &str, expected_extensions: &[String]) -> (String, Option<String>) {
     if path.trim().is_empty() {
-        return ("missing".to_string(), Some("No local path recorded.".to_string()));
+        return (
+            "missing".to_string(),
+            Some("No local path recorded.".to_string()),
+        );
     }
     let path = Path::new(path);
     if !path.exists() {
@@ -1292,7 +1389,11 @@ fn find_matching_game_file(root: &Path, expected_extensions: &[String]) -> Optio
     None
 }
 
-fn remove_path_if_allowed(data_dir: &Path, download_root: &Path, candidate: &Path) -> Result<(), String> {
+fn remove_path_if_allowed(
+    data_dir: &Path,
+    download_root: &Path,
+    candidate: &Path,
+) -> Result<(), String> {
     if !candidate.exists() {
         return Ok(());
     }
@@ -1315,7 +1416,12 @@ fn remove_path_if_allowed(data_dir: &Path, download_root: &Path, candidate: &Pat
     } else {
         fs::remove_file(&canonical_candidate)
     }
-    .map_err(|error| format!("Failed to remove {}: {error}", canonical_candidate.display()))
+    .map_err(|error| {
+        format!(
+            "Failed to remove {}: {error}",
+            canonical_candidate.display()
+        )
+    })
 }
 
 fn open_path(path: &Path) -> Result<(), String> {

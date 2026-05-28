@@ -75,7 +75,7 @@ export function WelcomeScreen({ initialMessage, onConnect }: WelcomeScreenProps)
             </button>
           </div>
           <p className="text-xs leading-6 text-white/42">
-            RetroHydra loads only repositories you add. It does not ship a catalog or hosted content links.
+            RetroHydra includes a first-party smoke-test demo and loads community repositories only when you add them.
           </p>
           {message && (
             <div className="rounded-md border border-amber-300/24 bg-amber-300/10 px-3 py-2 text-sm text-amber-100">

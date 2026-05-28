@@ -3,6 +3,7 @@ node_modules/
 dist/
 out/
 .next/
+.tmp/
 release/
 src-tauri/target/
 *.log

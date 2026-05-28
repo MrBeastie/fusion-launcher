@@ -72,6 +72,35 @@ describe('repository schema', () => {
     assert.equal(repo.system_files[0].sources[0].kind, 'user_provided');
   });
 
+  it('accepts bundled sources for local built-in repository validation', () => {
+    const repo = validateRepositorySchema({
+      metadata: {
+        id: 'retrohydra-demo',
+        name: 'RetroHydra Built-in Demo Repository',
+        version: '1.0.0',
+        schemaVersion: 2,
+        trustLevel: 'official'
+      },
+      system_files: [],
+      catalog: [
+        {
+          id: 'retrohydra_nes_smoke',
+          platform: 'nes',
+          title: 'RetroHydra NES Smoke Demo',
+          downloads: [{
+            kind: 'bundled',
+            path: 'demo-content/retrohydra-smoke.nes',
+            sha256: hash,
+            sizeBytes: 24592
+          }],
+          expectedExtensions: ['.nes']
+        }
+      ]
+    });
+
+    assert.equal(repo.catalog[0].downloads[0].kind, 'bundled');
+  });
+
   it('rejects HTTP assets without sha256', () => {
     assert.throws(() => validateRepositorySchema({
       metadata: { id: 'bad', name: 'Bad', version: '1', schemaVersion: 2 },

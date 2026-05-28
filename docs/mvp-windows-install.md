@@ -3,5 +3,6 @@
 1. Build the installer with `npm run tauri:build` on Windows.
 2. Install the generated NSIS setup from `src-tauri/target/release/bundle/nsis`.
 3. Windows may warn because the internal MVP is unsigned. Code signing is intentionally deferred until after MVP validation.
-4. On first launch, connect the official demo repository, configure one MVP emulator, download a demo entry, then run Settings -> Health Check.
+4. On first launch, choose the built-in demo repository, configure the NES emulator, download the first-party demo entry, then run Settings -> Health Check.
 5. Logs are written to the app local data directory under `logs/retrohydra.log`; use Settings -> Copy diagnostics when reporting launch or download issues.
+6. Updater packages are signed by Tauri's updater key, not the Windows code-signing certificate. Store the private key in GitHub Actions as `TAURI_SIGNING_PRIVATE_KEY` and store its password, if one is used, as `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Never commit the private key.
