@@ -5,18 +5,20 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 mod app_update;
+mod archive;
 mod builtin_demo;
 mod commands;
 mod downloads;
 mod emulator_profiles;
-mod emulator_setup;
 mod game_files;
 mod github_resolver;
 mod launcher;
 mod logging;
 mod orchestrator;
-mod platform;
+mod rom_hasher;
 mod schema;
+mod scraper;
+mod scrapers;
 mod security;
 mod setup_profiles;
 mod storage;
@@ -31,6 +33,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub torrents: TorrentManager,
     pub running_games: Arc<Mutex<HashMap<String, u32>>>,
+    pub library_scrape: scraper::LibraryScrapeRuntime,
 }
 
 pub fn run() {
@@ -83,6 +86,7 @@ pub fn run() {
                 data_dir,
                 torrents,
                 running_games: Arc::new(Mutex::new(HashMap::new())),
+                library_scrape: scraper::LibraryScrapeRuntime::new(),
             });
             Ok(())
         })
@@ -100,6 +104,17 @@ pub fn run() {
             commands::disconnect_repository,
             commands::get_catalog,
             commands::get_game,
+            commands::scrape_game,
+            commands::get_scrape_state,
+            commands::list_scrape_candidates,
+            commands::apply_scrape_override,
+            commands::clear_scrape_override,
+            commands::save_screenscraper_credentials,
+            commands::get_screenscraper_status,
+            commands::save_steamgriddb_key,
+            commands::get_steamgriddb_status,
+            commands::scrape_library,
+            commands::cancel_library_scrape,
             commands::check_requirements,
             commands::get_library_statuses,
             commands::list_platform_setup_profiles,
@@ -139,8 +154,6 @@ pub fn run() {
             torrent::pause_download,
             torrent::resume_download,
             torrent::cancel_download,
-            emulator_setup::get_recommended_emulators,
-            emulator_setup::install_recommended_emulator,
             app_update::check_app_update,
             app_update::install_app_update
         ])

@@ -152,6 +152,75 @@ pub struct GameMetadata {
     pub external_ids: std::collections::BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrapedGamePayload {
+    pub provider: String,
+    pub provider_game_id: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub cover: Option<String>,
+    #[serde(default)]
+    pub hero: Option<String>,
+    #[serde(default)]
+    pub logo: Option<String>,
+    #[serde(default)]
+    pub screenshots: Vec<String>,
+    pub metadata: GameMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrapeCandidate {
+    pub provider: String,
+    pub provider_game_id: String,
+    pub title: String,
+    pub platform: Option<String>,
+    pub release_year: Option<u16>,
+    pub developer: Option<String>,
+    pub cover: Option<String>,
+    pub match_kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrapeStateView {
+    pub game_id: String,
+    pub status: String,
+    pub match_kind: Option<String>,
+    pub candidates: Vec<ScrapeCandidate>,
+    pub message: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenScraperStatus {
+    pub configured: bool,
+    pub ssid: Option<String>,
+    pub region: String,
+    pub daily_requests: u32,
+    pub daily_limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteamGridDbStatus {
+    pub configured: bool,
+    pub key_source: String,
+    pub daily_requests: u32,
+    pub daily_limit: u32,
+    pub pending_batch: usize,
+    pub batch_running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryScrapeStatus {
+    pub running: bool,
+    pub pending: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositorySummary {
@@ -545,4 +614,37 @@ pub struct DiagnosticsBundle {
 pub struct DiagnosticsPaths {
     pub data_dir: String,
     pub log_path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scraped_payload_deserializes_without_new_artwork_fields() {
+        let payload: ScrapedGamePayload = serde_json::from_str(
+            r#"{
+              "provider": "screenscraper",
+              "providerGameId": "123",
+              "title": "Game",
+              "description": null,
+              "cover": "https://example.com/cover.jpg",
+              "metadata": {
+                "releaseYear": null,
+                "developer": null,
+                "publisher": null,
+                "genres": [],
+                "tags": [],
+                "players": null,
+                "series": null,
+                "externalIds": {}
+              }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(payload.hero.is_none());
+        assert!(payload.logo.is_none());
+        assert!(payload.screenshots.is_empty());
+    }
 }

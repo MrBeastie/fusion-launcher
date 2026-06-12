@@ -55,6 +55,14 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Compile-time built-in SteamGridDB key (read via option_env!). Optional:
+          # when the secret is unset the binary falls back to the per-user key.
+          RETROHYDRA_STEAMGRIDDB_KEY: ${{ secrets.RETROHYDRA_STEAMGRIDDB_KEY }}
+          # Compile-time ScreenScraper developer credentials (read via option_env!).
+          # Optional: lift anonymous rate limits in official builds. Without them
+          # scraping still works per-user but under stricter anonymous throttling.
+          RETROHYDRA_SCREENSCRAPER_DEVID: ${{ secrets.RETROHYDRA_SCREENSCRAPER_DEVID }}
+          RETROHYDRA_SCREENSCRAPER_DEVPASSWORD: ${{ secrets.RETROHYDRA_SCREENSCRAPER_DEVPASSWORD }}
         run: npm run tauri:build -- --target x86_64-pc-windows-msvc
 
       - name: Run packaged smoke

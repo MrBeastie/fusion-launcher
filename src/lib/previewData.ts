@@ -9,16 +9,20 @@ import type {
   HealthReport,
   ImportAssetFileReport,
   ImportGameFileReport,
+  LibraryScrapeStatus,
   LaunchReport,
   LibraryGameStatus,
   OnboardingState,
   PlatformSetupProfile,
   ProfileEmulatorConfig,
-  RecommendedEmulator,
   RepairLibraryReport,
   RepositoryPreview,
   RepositorySummary,
   RequirementsReport,
+  ScrapeCandidate,
+  ScrapeState,
+  ScreenScraperStatus,
+  SteamGridDbStatus,
   TorrentDownloadRecord,
   TorrentStartReport,
   TorrentStatus,
@@ -41,15 +45,15 @@ const now = '2026-05-26T08:00:00.000Z';
 
 const repository: RepositorySummary = {
   id: 'retrohydra-preview',
-  name: 'RetroHydra Preview Repository',
+  name: 'Fusion Preview Repository',
   version: '1.0.0',
-  url: 'preview://retrohydra',
+  url: 'preview://fusion',
   connectedAt: now,
   catalogCount: 13,
   systemFileCount: 3,
-  maintainer: 'RetroHydra Team',
-  homepageUrl: 'https://retrohydra.local',
-  license: 'Mixed legal homebrew/demo content',
+  maintainer: 'Fusion Team',
+  homepageUrl: 'https://fusion.local',
+  license: 'Legal homebrew/demo content',
   trustLevel: 'official',
   contentHash: '0'.repeat(64),
   lastRefreshedAt: now,
@@ -60,8 +64,8 @@ const catalog: CatalogGame[] = [
   game(
     'retrohydra_nes_smoke',
     'nes',
-    'RetroHydra NES Smoke Demo',
-    'First-party NES smoke demo for the one-click setup path.',
+    'Fusion NES Smoke Demo',
+    'Встроенная NES demo для быстрого первого запуска.',
     ['.nes'],
     [{ kind: 'bundled', path: 'demo-content/retrohydra-smoke.nes', sha256: '9'.repeat(64), sizeBytes: 24592 }],
     { setupProfileId: 'nes-mesen' }
@@ -73,14 +77,14 @@ const catalog: CatalogGame[] = [
     },
     metadata: {
       releaseYear: 2026,
-      developer: 'RetroHydra Labs',
+      developer: 'Fusion Labs',
       genres: ['Platformer', 'Homebrew'],
       players: '1 player'
     }
   }),
   game('neon-rally', 'psp', 'Neon Rally Portable', 'Arcade racing with synthetic night tracks and drift challenges.', ['.iso']),
-  game('star-orbit', 'switch', 'Star Orbit Prototype', 'A community tech demo for testing modern handheld workflows.', ['.nsp', '.xci'], [
-    { kind: 'user_provided', instructions: 'Import your locally built or legally dumped .nsp/.xci package.' }
+  game('star-orbit', 'switch', 'Star Orbit Prototype', 'Техно-demo сообщества для проверки современных handheld-сценариев.', ['.nsp', '.xci'], [
+    { kind: 'user_provided', instructions: 'Импортируй локально собранный или легально снятый .nsp/.xci пакет.' }
   ], {
     contentMode: 'user_provided',
     setupProfileId: 'switch-manual',
@@ -93,9 +97,9 @@ const catalog: CatalogGame[] = [
       releaseYear: 2026,
       developer: 'North Pier Interactive',
       publisher: 'Community Preview',
-      genres: ['Adventure', 'Tech Demo'],
+      genres: ['Приключение', 'Tech Demo'],
       tags: ['user-provided', 'modern-console'],
-      players: '1 player',
+      players: '1 игрок',
       series: 'Star Orbit'
     }
   }),
@@ -117,10 +121,25 @@ let downloads: TorrentDownloadRecord[] = [
   torrent('signal-echo', 'error', 18, 1_600_000_000, 8_900_000_000, 0, 0, 'No peers were found for this magnet.')
 ];
 
-let emulatorConfigs: EmulatorConfig[] = [];
 let profileEmulatorConfigs: ProfileEmulatorConfig[] = [];
 let profileSystemFileImports: Record<string, string> = {};
 let downloadRoot = 'preview://games';
+let scraperStatus: ScreenScraperStatus = {
+  configured: false,
+  ssid: null,
+  region: 'auto',
+  dailyRequests: 0,
+  dailyLimit: 20_000
+};
+let steamgriddbStatus: SteamGridDbStatus = {
+  configured: false,
+  keySource: 'none',
+  dailyRequests: 0,
+  dailyLimit: 1_000,
+  pendingBatch: 0,
+  batchRunning: false
+};
+let scrapeStates: Record<string, ScrapeState> = {};
 
 export const previewApi = {
   async previewRepository(url = repository.url): Promise<RepositoryPreview> {
@@ -143,7 +162,7 @@ export const previewApi = {
     return previewApi.previewRepository(path ? `file://${path}` : 'file://preview/repository.json');
   },
   async previewBuiltInDemoRepository(): Promise<RepositoryPreview> {
-    return previewApi.previewRepository('retrohydra://builtin/demo-repository.json');
+    return previewApi.previewRepository('fusion://builtin/demo-repository.json');
   },
   async connectRepository(_url = repository.url): Promise<RepositorySummary> {
     return repository;
@@ -157,7 +176,7 @@ export const previewApi = {
   async connectBuiltInDemoRepository(): Promise<RepositorySummary> {
     return {
       ...repository,
-      url: 'retrohydra://builtin/demo-repository.json'
+      url: 'fusion://builtin/demo-repository.json'
     };
   },
   async refreshRepository(_repositoryId = repository.id): Promise<RepositorySummary> {
@@ -167,12 +186,13 @@ export const previewApi = {
     return { repaired: false, repositoryId: null, removedPaths: [] };
   },
   async getOnboardingState(): Promise<OnboardingState> {
+    const configs = listDefaultEmulatorConfigs();
     return {
-      step: emulatorConfigs.length > 0 ? 'complete' : 'configureEmulator',
+      step: configs.length > 0 ? 'complete' : 'configureEmulator',
       repositoriesConfigured: true,
-      emulatorsConfigured: emulatorConfigs.length > 0,
+      emulatorsConfigured: configs.length > 0,
       catalogCount: catalog.length,
-      validEmulatorCount: emulatorConfigs.filter((config) => config.status === 'valid').length
+      validEmulatorCount: configs.filter((config) => config.status === 'valid').length
     };
   },
   async listRepositories(): Promise<RepositorySummary[]> {
@@ -187,6 +207,97 @@ export const previewApi = {
   async getGame(gameId: string): Promise<CatalogGame | null> {
     return catalog.find((item) => item.id === gameId) ?? null;
   },
+  async scrapeGame(gameId: string): Promise<void> {
+    const game = catalog.find((item) => item.id === gameId);
+    if (!game) throw new Error(`Unknown preview game: ${gameId}`);
+    if (!scraperStatus.configured) {
+      scrapeStates[gameId] = scrapeState(gameId, 'skipped', null, [], 'ScreenScraper credentials are not configured.');
+      return;
+    }
+    const matchKind = game.contentMode === 'metadata_only' ? 'name' : 'hash';
+    scrapeStates[gameId] = scrapeState(gameId, 'ready', matchKind, [], null);
+    if (!game.artwork?.cover && !game.coverImageUrl) {
+      Object.assign(game, {
+        artwork: {
+          ...(game.artwork ?? {}),
+          cover: `https://example.com/retrohydra/screenscraper/${game.id}.jpg`
+        },
+        metadata: {
+          ...(game.metadata ?? {}),
+          developer: game.metadata?.developer ?? 'ScreenScraper Preview',
+          genres: game.metadata?.genres?.length ? game.metadata.genres : ['Arcade']
+        }
+      });
+    }
+  },
+  async getScrapeState(gameId: string): Promise<ScrapeState> {
+    return scrapeStates[gameId] ?? scrapeState(gameId, 'pending', null, [], null);
+  },
+  async listScrapeCandidates(gameId: string): Promise<ScrapeCandidate[]> {
+    return (scrapeStates[gameId] ?? scrapeState(gameId, 'pending', null, [], null)).candidates;
+  },
+  async applyScrapeOverride(gameId: string, providerGameId: string): Promise<void> {
+    const game = catalog.find((item) => item.id === gameId);
+    if (!game) throw new Error(`Unknown preview game: ${gameId}`);
+    scrapeStates[gameId] = scrapeState(gameId, 'ready', 'override', [], `Manual override ${providerGameId} applied.`);
+  },
+  async clearScrapeOverride(gameId: string): Promise<boolean> {
+    const existed = Boolean(scrapeStates[gameId]);
+    scrapeStates[gameId] = scrapeState(gameId, 'pending', null, [], 'Manual override cleared.');
+    return existed;
+  },
+  async saveScreenscraperCredentials(ssid: string, sspassword: string, region = 'auto'): Promise<ScreenScraperStatus> {
+    scraperStatus = {
+      ...scraperStatus,
+      configured: Boolean(ssid.trim()) && (Boolean(sspassword.trim()) || scraperStatus.configured),
+      ssid: ssid.trim() || null,
+      region: normalizeScrapeRegion(region)
+    };
+    return scraperStatus;
+  },
+  async getScreenscraperStatus(): Promise<ScreenScraperStatus> {
+    return scraperStatus;
+  },
+  async saveSteamgriddbKey(apiKey: string): Promise<SteamGridDbStatus> {
+    steamgriddbStatus = {
+      ...steamgriddbStatus,
+      configured: Boolean(apiKey.trim()),
+      keySource: apiKey.trim() ? 'user' : 'none'
+    };
+    return steamgriddbStatus;
+  },
+  async getSteamgriddbStatus(): Promise<SteamGridDbStatus> {
+    return steamgriddbStatus;
+  },
+  async scrapeLibrary(): Promise<LibraryScrapeStatus> {
+    const installedGameIds = downloads
+      .filter((download) => download.status === 'completed')
+      .map((download) => download.gameId);
+    installedGameIds.forEach((gameId) => {
+      scrapeStates[gameId] = scrapeState(gameId, 'pending', null, [], 'Queued for library metadata scrape.');
+    });
+    steamgriddbStatus = {
+      ...steamgriddbStatus,
+      pendingBatch: installedGameIds.length,
+      batchRunning: installedGameIds.length > 0
+    };
+    installedGameIds.forEach((gameId) => {
+      scrapeStates[gameId] = scrapeState(gameId, 'ready', 'hash', [], 'Preview library scrape completed.');
+    });
+    steamgriddbStatus = {
+      ...steamgriddbStatus,
+      pendingBatch: 0,
+      batchRunning: false
+    };
+    return { running: false, pending: 0 };
+  },
+  async cancelLibraryScrape(): Promise<LibraryScrapeStatus> {
+    steamgriddbStatus = {
+      ...steamgriddbStatus,
+      batchRunning: false
+    };
+    return { running: false, pending: steamgriddbStatus.pendingBatch };
+  },
   async checkRequirements(gameId: string): Promise<RequirementsReport> {
     const setup = await previewApi.getGameSetupState(gameId);
     return {
@@ -200,10 +311,8 @@ export const previewApi = {
     return catalog.map((item) => {
       const download = downloads.find((record) => record.gameId === item.id) ?? null;
       const installed = download?.status === 'completed';
-      const emulatorReady = emulatorConfigs.some((config) => (
-        config.platform === item.platform && config.status === 'valid'
-      ));
-      const missingRequirements = installed && !emulatorReady ? [`Configure ${item.platform.toUpperCase()} emulator`] : [];
+      const emulatorReady = emulatorConfigForPlatform(item.platform)?.status === 'valid';
+      const missingRequirements = installed && !emulatorReady ? [`Настрой эмулятор ${item.platform.toUpperCase()}`] : [];
 
       return {
         gameId: item.id,
@@ -234,7 +343,7 @@ export const previewApi = {
           gameId,
           status: 'error',
           errorCode: 'switch_emulator_not_configured',
-          message: 'Select a Switch emulator executable before installing this game.'
+          message: 'Выбери исполняемый файл Switch-эмулятора перед установкой игры.'
         };
       }
       await previewApi.installEmulator(game.platform);
@@ -248,7 +357,7 @@ export const previewApi = {
         gameId,
         status: 'needs_system_files',
         errorCode: `missing:${missingSystemFiles.join(',')}`,
-        message: `Import once to continue: ${missingSystemFiles.join(', ')}`
+        message: `Импортируй один раз, чтобы продолжить: ${missingSystemFiles.join(', ')}`
       };
     }
     if (setup.gameFile.status !== 'ready') {
@@ -257,7 +366,7 @@ export const previewApi = {
           gameId,
           status: 'error',
           errorCode: 'game_requires_import',
-          message: 'Import your local game file to continue.'
+          message: 'Импортируй локальный файл игры, чтобы продолжить.'
         };
       }
       await previewApi.startGameDownload(gameId);
@@ -275,13 +384,13 @@ export const previewApi = {
   },
   async installEmulator(platform: string): Promise<EmulatorInstallResult> {
     if (platform === 'switch') {
-      throw new Error('switch_emulator_not_configured: Select a Switch emulator executable.');
+      throw new Error('switch_emulator_not_configured: выбери исполняемый файл Switch-эмулятора.');
     }
     const profile = getDefaultPlatformSetupProfile(platform);
     if (!profile || profile.emulator.installMode !== 'downloadable') {
       throw new Error(`no_profile_for:${platform}`);
     }
-    const existing = emulatorConfigs.find((item) => item.platform === platform && item.status === 'valid');
+    const existing = emulatorConfigForPlatform(platform);
     if (existing?.exePath) {
       return {
         profileId: profile.id,
@@ -293,15 +402,14 @@ export const previewApi = {
     const exePath = `preview://emulators/${platform}/${profile.emulator.executableName ?? `${platform}.exe`}`;
     const version = 'latest';
     await previewApi.saveEmulatorConfig(platform, exePath, profile.launch.argsTemplate);
-    await previewApi.selectProfileEmulator(profile.id, exePath);
     return { profileId: profile.id, exePath, version, fromCache: false };
   },
   async getEmulatorStatus(platform: string): Promise<EmulatorStatus> {
     const profile = getDefaultPlatformSetupProfile(platform);
-    const config = emulatorConfigs.find((item) => item.platform === platform && item.status === 'valid');
+    const config = emulatorConfigForPlatform(platform);
     return {
       platform: platform as Platform,
-      installed: Boolean(config?.exePath),
+      installed: Boolean(config?.exePath) && config?.status === 'valid',
       exePath: config?.exePath ?? null,
       profileId: profile?.id ?? null
     };
@@ -331,7 +439,6 @@ export const previewApi = {
       launchArgsTemplate: profile.launch.argsTemplate
     };
     profileEmulatorConfigs = [config, ...profileEmulatorConfigs.filter((item) => item.profileId !== profile.id)];
-    await previewApi.saveEmulatorConfig(profile.platform, executablePath, profile.launch.argsTemplate);
     return config;
   },
   async importProfileSystemFile(
@@ -356,47 +463,28 @@ export const previewApi = {
     return { status: 'installed', installedPath };
   },
   async listEmulatorConfigs(): Promise<EmulatorConfig[]> {
-    return emulatorConfigs;
-  },
-  async getRecommendedEmulators(): Promise<RecommendedEmulator[]> {
-    return ['switch', 'ps1', 'ps2', 'gba', 'nes'].map((platform) => {
-      const config = emulatorConfigs.find((item) => item.platform === platform);
-      const nes = platform === 'nes';
-      return {
-        platform: platform as RecommendedEmulator['platform'],
-        platformLabel: platform === 'nes' ? 'NES / Famicom' : platform.toUpperCase(),
-        emulatorName: nes ? 'Mesen2' : `${platform.toUpperCase()} emulator`,
-        version: nes ? '2.1.1' : null,
-        downloadUrl: nes ? 'https://github.com/SourMesen/Mesen2/releases/download/2.1.1/Mesen_2.1.1_Windows.zip' : null,
-        sha256: nes ? '23ccc2bc060b663c68dad3a8c5d6da7d23a50f872d04f135bafa2b04ff7d5cbe' : null,
-        executableName: nes ? 'Mesen.exe' : `${platform}.exe`,
-        status: config ? 'installed' : nes ? 'available' : 'manual',
-        installedPath: config?.exePath ?? null,
-        message: config ? 'Configured' : nes ? 'Available for automatic setup' : 'Manual setup required'
-      };
-    });
-  },
-  async installRecommendedEmulator(platform: string): Promise<EmulatorConfig> {
-    if (platform !== 'nes') throw new Error('Automatic setup is available only for NES / Mesen2.');
-    return previewApi.saveEmulatorConfig('nes', 'preview://emulators/Mesen2-2.1.1/Mesen.exe', '{game_path}');
+    return listDefaultEmulatorConfigs();
   },
   async saveEmulatorConfig(
     platform: string,
     exePath: string,
     launchArgsTemplate?: string
   ): Promise<EmulatorConfig> {
-    const config: EmulatorConfig = {
-      platform: platform as EmulatorConfig['platform'],
+    const profile = getDefaultPlatformSetupProfile(platform);
+    if (!profile) throw new Error(`No default setup profile for ${platform}`);
+    const config: ProfileEmulatorConfig = {
+      profileId: profile.id,
+      platform: profile.platform,
       exePath,
       status: exePath.trim() ? 'valid' : 'invalid',
       lastValidatedAt: new Date().toISOString(),
-      launchArgsTemplate
+      launchArgsTemplate: launchArgsTemplate ?? profile.launch.argsTemplate
     };
-    emulatorConfigs = [config, ...emulatorConfigs.filter((item) => item.platform !== platform)];
-    return config;
+    profileEmulatorConfigs = [config, ...profileEmulatorConfigs.filter((item) => item.profileId !== profile.id)];
+    return toEmulatorConfig(config);
   },
   async validateEmulatorConfig(platform: string): Promise<EmulatorConfig> {
-    const config = emulatorConfigs.find((item) => item.platform === platform);
+    const config = emulatorConfigForPlatform(platform);
     if (!config) throw new Error(`No emulator config is stored for ${platform}`);
     return {
       ...config,
@@ -404,9 +492,11 @@ export const previewApi = {
     };
   },
   async deleteEmulatorConfig(platform: string): Promise<boolean> {
-    const before = emulatorConfigs.length;
-    emulatorConfigs = emulatorConfigs.filter((item) => item.platform !== platform);
-    return emulatorConfigs.length !== before;
+    const profile = getDefaultPlatformSetupProfile(platform);
+    if (!profile) return false;
+    const before = profileEmulatorConfigs.length;
+    profileEmulatorConfigs = profileEmulatorConfigs.filter((item) => item.profileId !== profile.id);
+    return profileEmulatorConfigs.length !== before;
   },
   async downloadAsset(assetId: string): Promise<DownloadRecord> {
     return downloadRecord(assetId, 'asset');
@@ -459,7 +549,7 @@ export const previewApi = {
     const game = catalog.find((item) => item.id === gameId);
     const source = game?.downloads[0];
     if (game && (game.contentMode === 'user_provided' || game.contentMode === 'metadata_only' || isUserProvidedGame(game))) {
-      throw new Error('This game uses a user-provided file. Import it from Game Details.');
+      throw new Error('Для этой игры нужен пользовательский файл. Импортируй его в деталях игры.');
     }
     if (source?.kind === 'http' || source?.kind === 'bundled') {
       const record = downloadRecord(gameId, 'game');
@@ -512,7 +602,7 @@ export const previewApi = {
   async getDiagnosticsPaths(): Promise<DiagnosticsPaths> {
     return {
       dataDir: 'preview://data',
-      logPath: 'preview://logs/retrohydra.log'
+      logPath: 'preview://logs/fusion.log'
     };
   },
   async getDiagnosticsBundle(): Promise<DiagnosticsBundle> {
@@ -521,7 +611,7 @@ export const previewApi = {
       appVersion: '0.1.0-preview',
       os: 'preview browser',
       dataDir: 'preview://data',
-      logPath: 'preview://logs/retrohydra.log',
+      logPath: 'preview://logs/fusion.log',
       health: previewHealthReport(),
       downloads,
       logs: ['{"event":"preview"}']
@@ -590,7 +680,7 @@ export const previewApi = {
     if (setup.launch.status !== 'ready') {
       throw new Error(setup.launch.blockers.join('; '));
     }
-    const emulator = emulatorConfigs.find((item) => item.platform === setup.emulator.platform);
+    const emulator = emulatorConfigForPlatform(setup.emulator.platform);
     const gamePath = downloads.find((item) => item.gameId === gameId)?.saveDir ?? `preview://games/${gameId}`;
     return {
       pid: 1,
@@ -636,6 +726,27 @@ function game(
     requiredSystemFileIds: [],
     ...extras
   };
+}
+
+function scrapeState(
+  gameId: string,
+  status: ScrapeState['status'],
+  matchKind: ScrapeState['matchKind'] | null,
+  candidates: ScrapeCandidate[],
+  message: string | null
+): ScrapeState {
+  return {
+    gameId,
+    status,
+    matchKind,
+    candidates,
+    message,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function normalizeScrapeRegion(region: string): ScreenScraperStatus['region'] {
+  return region === 'eu' || region === 'us' || region === 'jp' ? region : 'auto';
 }
 
 function torrent(
@@ -697,15 +808,42 @@ function isUserProvidedGame(game: CatalogGame) {
   return game.contentMode === 'user_provided' || game.downloads.some((source) => source.kind === 'user_provided');
 }
 
+function listDefaultEmulatorConfigs(): EmulatorConfig[] {
+  return profileEmulatorConfigs
+    .filter((config) => getDefaultPlatformSetupProfile(config.platform)?.id === config.profileId)
+    .map(toEmulatorConfig);
+}
+
+function emulatorConfigForPlatform(platform: string): EmulatorConfig | null {
+  const profile = getDefaultPlatformSetupProfile(platform);
+  if (!profile) return null;
+  const config = profileEmulatorConfigs.find((item) => item.profileId === profile.id);
+  return config ? toEmulatorConfig(config) : null;
+}
+
+function toEmulatorConfig(config: ProfileEmulatorConfig): EmulatorConfig {
+  const status: EmulatorConfig['status'] =
+    config.status === 'valid' || config.status === 'missing' || config.status === 'invalid'
+      ? config.status
+      : 'invalid';
+  return {
+    platform: config.platform,
+    exePath: config.exePath ?? undefined,
+    status,
+    lastValidatedAt: config.lastValidatedAt ?? undefined,
+    version: config.version ?? undefined,
+    launchArgsTemplate: config.launchArgsTemplate ?? undefined
+  };
+}
+
 function buildPreviewGameSetupState(game: CatalogGame): GameSetupState {
   const profile = getPlatformSetupProfile(game.setupProfileId)
     ?? getDefaultPlatformSetupProfile(game.platform);
   const unsupportedProfileId = game.setupProfileId && !profile ? game.setupProfileId : null;
   const expectedExtensions = profile?.gameFiles.expectedExtensions ?? game.expectedExtensions;
   const profileConfig = profileEmulatorConfigs.find((item) => item.profileId === profile?.id);
-  const legacyConfig = emulatorConfigs.find((item) => item.platform === (profile?.platform ?? game.platform));
-  const emulatorPath = profileConfig?.exePath ?? legacyConfig?.exePath ?? null;
-  const emulatorReady = Boolean(emulatorPath) && (profileConfig?.status ?? legacyConfig?.status) === 'valid';
+  const emulatorPath = profileConfig?.exePath ?? null;
+  const emulatorReady = Boolean(emulatorPath) && profileConfig?.status === 'valid';
   const download = downloads.find((item) => item.gameId === game.id && item.status === 'completed');
   const fileName = download?.saveDir.toLowerCase() ?? '';
   const gameFileReady = Boolean(download) && (
@@ -728,12 +866,12 @@ function buildPreviewGameSetupState(game: CatalogGame): GameSetupState {
   });
 
   const blockers = [
-    ...(unsupportedProfileId ? [`Unsupported setup profile: ${unsupportedProfileId}`] : []),
+    ...(unsupportedProfileId ? [`Профиль запуска не поддерживается: ${unsupportedProfileId}`] : []),
     ...(!emulatorReady ? [profile?.emulator.installMode === 'downloadable'
-      ? `Install ${profile.emulator.emulatorName}`
-      : `Select ${profile?.emulator.emulatorName ?? `${game.platform.toUpperCase()} emulator`}`] : []),
-    ...systemFiles.filter((item) => item.required && item.status !== 'ready').map((item) => `Import ${item.label}`),
-    ...(!gameFileReady ? ['Game file is missing.'] : [])
+      ? `Установи ${profile.emulator.emulatorName}`
+      : `Выбери ${profile?.emulator.emulatorName ?? `${game.platform.toUpperCase()} эмулятор`}`] : []),
+    ...systemFiles.filter((item) => item.required && item.status !== 'ready').map((item) => `Импортируй ${item.label}`),
+    ...(!gameFileReady ? ['Файл игры не найден.'] : [])
   ];
   const launchReady = blockers.length === 0;
 
@@ -746,10 +884,10 @@ function buildPreviewGameSetupState(game: CatalogGame): GameSetupState {
       status: emulatorReady ? 'ready' : profile?.emulator.installMode === 'downloadable' ? 'missing' : 'manual_required',
       profileId: profile?.id ?? null,
       platform: profile?.platform ?? game.platform,
-      emulatorName: profile?.emulator.emulatorName ?? `${game.platform.toUpperCase()} emulator`,
+      emulatorName: profile?.emulator.emulatorName ?? `${game.platform.toUpperCase()} эмулятор`,
       installMode: profile?.emulator.installMode ?? 'manual',
       executablePath: emulatorPath,
-      message: emulatorReady ? null : 'Emulator is not configured.'
+      message: emulatorReady ? null : 'Эмулятор не настроен.'
     },
     systemFiles,
     repositoryRequirements: [],
@@ -758,7 +896,7 @@ function buildPreviewGameSetupState(game: CatalogGame): GameSetupState {
       installedPath: download?.saveDir ?? null,
       expectedExtensions,
       allowDirectory: profile?.gameFiles.allowDirectory ?? true,
-      message: gameFileReady ? download?.saveDir : 'Game file is missing.'
+      message: gameFileReady ? download?.saveDir : 'Файл игры не найден.'
     },
     launch: {
       status: launchReady ? 'ready' : 'blocked',
@@ -812,19 +950,18 @@ function previewHealthReport(): HealthReport {
   return {
     generatedAt: new Date().toISOString(),
     emulators: ['switch', 'ps1', 'ps2', 'gba', 'nes'].map((platform) => {
-      const config = emulatorConfigs.find((item) => item.platform === platform);
+      const config = emulatorConfigForPlatform(platform);
       return {
         id: `emulator:${platform}`,
-        label: `${platform.toUpperCase()} emulator`,
+        label: `${platform.toUpperCase()} эмулятор`,
         status: config ? 'ready' : 'missing',
-        message: config?.exePath ?? 'Not configured',
+        message: config?.exePath ?? 'Не настроено',
         action: config ? 'openEmulatorFolder' : 'reconfigureEmulator',
         path: config?.exePath ?? undefined
       };
     }),
     platformSetup: PLATFORM_SETUP_PROFILES.map((profile) => {
-      const config = profileEmulatorConfigs.find((item) => item.profileId === profile.id)
-        ?? emulatorConfigs.find((item) => item.platform === profile.platform);
+      const config = profileEmulatorConfigs.find((item) => item.profileId === profile.id);
       const requiredMissing = profile.systemFiles.filter((requirement) => (
         requirement.required && !profileSystemFileImports[`${profile.id}:${requirement.id}`]
       )).length;
@@ -833,7 +970,7 @@ function previewHealthReport(): HealthReport {
         id: `profile:${profile.id}`,
         label: profile.displayName,
         status: ready ? 'ready' : 'missing',
-        message: ready ? 'Profile setup is ready.' : `${requiredMissing} required file(s) missing`,
+        message: ready ? 'Профиль запуска готов.' : `Не хватает файлов: ${requiredMissing}`,
         action: ready ? 'openProfileFolder' : 'configureProfile',
         path: config?.exePath ?? undefined
       };
@@ -843,7 +980,7 @@ function previewHealthReport(): HealthReport {
         id: 'asset:ps1-bios',
         label: 'PS1 BIOS',
         status: 'missing',
-        message: 'User-provided BIOS is not present.',
+        message: 'Пользовательский BIOS не добавлен.',
         action: 'openTargetFolder'
       }
     ],

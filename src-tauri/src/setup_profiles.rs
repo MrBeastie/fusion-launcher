@@ -3,10 +3,6 @@ use crate::schema::{
     ProfileEmulatorDownload, ProfileSystemFileRequirement,
 };
 
-const MESEN_DOWNLOAD_URL: &str =
-    "https://github.com/SourMesen/Mesen2/releases/download/2.1.1/Mesen_2.1.1_Windows.zip";
-const MESEN_SHA256: &str = "23ccc2bc060b663c68dad3a8c5d6da7d23a50f872d04f135bafa2b04ff7d5cbe";
-
 #[cfg(test)]
 pub const PRODUCTION_PROFILE_IDS: &[&str] = &[
     "nes-mesen",
@@ -25,15 +21,10 @@ pub fn list_platform_setup_profiles() -> Vec<PlatformSetupProfile> {
             "nes-mesen",
             "nes",
             "NES / Mesen2",
-            emulator_downloadable(
-                "Mesen2",
-                &["Mesen.exe"],
-                Some(ProfileEmulatorDownload {
-                    url: MESEN_DOWNLOAD_URL.to_string(),
-                    sha256: MESEN_SHA256.to_string(),
-                    version: "2.1.1".to_string(),
-                }),
-            ),
+            // Like every auto profile, the actual pinned/latest binary is
+            // resolved from profiles/emulators.json via the orchestrator. The
+            // setup profile only declares that NES is auto-installable.
+            emulator_downloadable("Mesen2", &["Mesen.exe"], None),
             game_files(&[".nes"], false, &[], &["ines"]),
             vec![],
             launch("{game_path}", None),
@@ -217,6 +208,35 @@ pub fn get_default_platform_setup_profile(platform: &str) -> Option<PlatformSetu
     get_platform_setup_profile(profile_id)
 }
 
+pub fn default_launch_args_for(platform: &str) -> Option<String> {
+    get_default_platform_setup_profile(platform).map(|profile| profile.launch.args_template)
+}
+
+pub fn platform_display_label(platform: &str) -> Option<String> {
+    get_default_platform_setup_profile(platform).map(|profile| {
+        profile
+            .display_name
+            .split_once(" / ")
+            .map(|(label, _)| label)
+            .unwrap_or(profile.display_name.as_str())
+            .to_string()
+    })
+}
+
+pub fn platform_emulator_name(platform: &str) -> Option<String> {
+    get_default_platform_setup_profile(platform).map(|profile| profile.emulator.emulator_name)
+}
+
+pub fn mvp_platforms() -> impl Iterator<Item = PlatformSetupProfile> {
+    ["nes", "snes", "n64", "gba", "ps2", "psp", "ps1", "switch"]
+        .into_iter()
+        .filter_map(get_default_platform_setup_profile)
+}
+
+pub fn has_default_setup_profile(platform: &str) -> bool {
+    get_default_platform_setup_profile(platform).is_some()
+}
+
 #[cfg(test)]
 pub fn is_known_profile(profile_id: &str) -> bool {
     get_platform_setup_profile(profile_id).is_some()
@@ -362,16 +382,17 @@ mod tests {
     }
 
     #[test]
-    fn only_mesen_has_pinned_download() {
+    fn setup_profiles_do_not_pin_emulator_downloads() {
+        // Auto-install binaries are resolved exclusively from
+        // profiles/emulators.json (GithubLatest) by the orchestrator. Setup
+        // profiles must not duplicate pinned URLs/hashes, which would silently
+        // drift from the real download.
         for profile in list_platform_setup_profiles() {
-            let download = profile.emulator.download;
-            if profile.id == "nes-mesen" {
-                let download = download.expect("nes-mesen must have a pinned emulator download");
-                assert!(download.url.contains("github.com/SourMesen/Mesen2"));
-                assert_eq!(download.sha256.len(), 64);
-            } else {
-                assert!(download.is_none());
-            }
+            assert!(
+                profile.emulator.download.is_none(),
+                "{} should not carry a pinned emulator download",
+                profile.id
+            );
         }
     }
 
@@ -388,5 +409,21 @@ mod tests {
                 .install_mode,
             "manual"
         );
+    }
+
+    #[test]
+    fn platform_helpers_are_derived_from_default_setup_profiles() {
+        assert!(has_default_setup_profile("switch"));
+        assert!(!has_default_setup_profile("dreamcast"));
+        assert_eq!(
+            default_launch_args_for("gba"),
+            Some("-f {game_path}".to_string())
+        );
+        assert_eq!(
+            platform_display_label("ps2"),
+            Some("PlayStation 2".to_string())
+        );
+        assert_eq!(platform_emulator_name("nes"), Some("Mesen2".to_string()));
+        assert_eq!(mvp_platforms().count(), 8);
     }
 }

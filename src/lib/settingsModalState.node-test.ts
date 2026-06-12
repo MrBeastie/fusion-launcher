@@ -25,7 +25,8 @@ const savedSettings: AppSettings = {
       exePath: 'C:/Emulators/DuckStation.exe',
       status: 'missing'
     }
-  }
+  },
+  language: 'en'
 };
 
 describe('settings modal draft state', () => {

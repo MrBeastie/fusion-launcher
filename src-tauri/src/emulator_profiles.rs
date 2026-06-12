@@ -4,6 +4,26 @@ use serde::{Deserialize, Serialize};
 
 const EMULATOR_PROFILES_JSON: &str = include_str!("../profiles/emulators.json");
 
+/// SPDX licenses under which we are willing to *automatically download and
+/// redistribute* an emulator binary to users. Non-commercial / no-derivatives
+/// licenses (e.g. DuckStation's CC BY-NC-ND, Snes9x's bespoke non-commercial
+/// terms) are intentionally excluded: those emulators must stay manual-select.
+/// This is a hard gate so a future contributor cannot silently add a
+/// non-redistributable emulator to the auto-install set.
+const AUTO_INSTALL_LICENSE_ALLOWLIST: &[&str] = &[
+    "GPL-2.0",
+    "GPL-2.0-or-later",
+    "GPL-3.0",
+    "GPL-3.0-or-later",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "MPL-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Apache-2.0",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmulatorProfile {
     pub id: String,
@@ -101,6 +121,13 @@ fn validate_profiles(profiles: &[EmulatorProfile]) -> Result<(), String> {
                 profile.id
             ));
         }
+        if !AUTO_INSTALL_LICENSE_ALLOWLIST.contains(&profile.license.trim()) {
+            return Err(format!(
+                "Automatic emulator profile {} has license '{}', which is not approved for \
+                 automatic download/redistribution. Such emulators must be manual-select.",
+                profile.id, profile.license
+            ));
+        }
         if !ids.insert(profile.id.clone()) {
             return Err(format!("Duplicate emulator profile id: {}", profile.id));
         }
@@ -127,6 +154,33 @@ mod tests {
             assert!(load_emulator_profile(platform).unwrap().is_some());
         }
         assert!(load_emulator_profile("switch").unwrap().is_none());
+    }
+
+    #[test]
+    fn bundled_auto_profiles_all_use_redistributable_licenses() {
+        // Every shipped auto-install profile must pass the license gate.
+        load_emulator_profiles().expect("bundled emulator profiles must validate");
+    }
+
+    #[test]
+    fn non_commercial_license_is_rejected_for_auto_install() {
+        let profiles = vec![EmulatorProfile {
+            id: "ps1-duckstation".to_string(),
+            platform: "ps1".to_string(),
+            display_name: "DuckStation".to_string(),
+            version_strategy: VersionStrategy::GithubLatest {
+                repo: "stenzek/duckstation".to_string(),
+                asset_pattern: "*.zip".to_string(),
+            },
+            exe_relative_path: "duckstation.exe".to_string(),
+            launch_args: vec!["{game}".to_string()],
+            requires_system_files: true,
+            license: "CC-BY-NC-ND-4.0".to_string(),
+            portable: true,
+        }];
+
+        let error = validate_profiles(&profiles).unwrap_err();
+        assert!(error.contains("not approved"));
     }
 
     #[test]

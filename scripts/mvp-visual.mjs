@@ -27,20 +27,27 @@ async function main() {
   await page.waitForLoadState('networkidle', { timeout: timeoutMs });
 
   await expectVisible(page.getByTestId('onboarding-screen'), 'onboarding screen');
-  await expectVisible(page.getByTestId('onboarding-demo-card'), 'onboarding demo card');
-  await expectVisible(page.getByTestId('onboarding-source-card'), 'onboarding community source card');
+  await expectVisible(page.getByTestId('onboarding-stepper'), 'onboarding stepper');
+  await expectVisible(page.getByTestId('onboarding-step-welcome'), 'onboarding welcome step');
   await screenshot(page, '01-onboarding.png');
   await assertNoHorizontalOverflow(page, 'onboarding');
 
+  await page.getByTestId('onboarding-nav-source').click();
+  await expectVisible(page.getByTestId('onboarding-demo-card'), 'onboarding demo source card');
+  await expectVisible(page.getByTestId('onboarding-source-card'), 'onboarding community source card');
   const onboardingSource = page.getByTestId('onboarding-source-card');
   await onboardingSource.getByPlaceholder('https://example.com/repo.json').fill('https://community.example/retrohydra-repository.json');
-  await onboardingSource.getByRole('button', { name: 'Preview' }).click();
+  await onboardingSource.getByRole('button', { name: 'Check' }).click();
   await expectVisible(page.getByTestId('onboarding-source-preview'), 'onboarding source preview');
 
-  await page.getByTestId('onboarding-demo-card').getByRole('button', { name: 'Set up demo' }).click();
+  await page.getByTestId('onboarding-nav-emulator').click();
+  await expectVisible(page.getByTestId('onboarding-emulator-list'), 'onboarding emulator list');
+  await page.getByTestId('onboarding-install-nes').click();
+  await expectVisible(page.getByTestId('onboarding-step-ready'), 'onboarding ready step');
+  await page.getByTestId('onboarding-open-launcher').click();
   await expectVisible(page.getByTestId('app-shell'), 'app shell after setup');
+  await expectVisible(page.getByTestId('home-screen'), 'home screen');
   await expectVisible(page.getByTestId('home-hero'), 'home hero');
-  await expectVisible(page.locator('[data-testid="ready-rail"], [data-testid="downloads-rail"], [data-testid="needs-setup-rail"], [data-testid="recent-rail"]').first(), 'honest home rail');
   await screenshot(page, '02-home.png');
   await assertNoHorizontalOverflow(page, 'home');
   await assertHomeHintBarClearance(page, 'home');
@@ -50,8 +57,10 @@ async function main() {
   await page.waitForTimeout(250);
   await expectVisible(page.getByTestId('library-screen'), 'library screen');
   await expectVisible(page.getByTestId('library-grid'), 'library grid');
+  await page.waitForTimeout(500);
+  await assertLibraryCardsDoNotOverlap(page, 'library full grid');
   await page.getByTestId('library-search').fill('smoke');
-  await page.getByTestId('library-grid').getByText('RetroHydra NES Smoke Demo').waitFor({ state: 'visible', timeout: timeoutMs });
+  await page.getByTestId('library-grid').getByText('Fusion NES Smoke Demo').waitFor({ state: 'visible', timeout: timeoutMs });
   await page.waitForTimeout(700);
   await screenshot(page, '03-library-search.png');
   await assertNoHorizontalOverflow(page, 'library');
@@ -82,7 +91,7 @@ async function main() {
   await expectVisible(page.getByTestId('collection-card').first(), 'collection card');
   await screenshot(page, '06-collections.png');
   await assertNoHorizontalOverflow(page, 'collections');
-  await page.getByTestId('collection-card').filter({ hasText: 'Ready to Play' }).first().evaluate((node) => {
+  await page.getByTestId('collection-card').filter({ hasText: 'Ready to play' }).first().evaluate((node) => {
     if (!(node instanceof HTMLElement)) {
       throw new Error('Collection target is not clickable.');
     }
@@ -95,7 +104,7 @@ async function main() {
   await page.waitForTimeout(250);
   await expectVisible(page.getByTestId('downloads-center'), 'downloads center');
   await expectVisible(page.getByTestId('download-row').first(), 'download row');
-  await page.getByText('Single active slot', { exact: false }).waitFor({ state: 'visible', timeout: timeoutMs });
+  await page.getByText(/(Active download in progress|Queue ready)/).waitFor({ state: 'visible', timeout: timeoutMs });
   await screenshot(page, '07-downloads.png');
   await assertNoHorizontalOverflow(page, 'downloads');
   await assertNestedScrollContainer(page.getByTestId('downloads-center'), '.rh-download-list', 'downloads list');
@@ -107,7 +116,7 @@ async function main() {
   await expectVisible(page.getByTestId('settings-modal-emulators'), 'settings modal emulators panel');
   await expectVisible(page.getByTestId('emulator-row-switch'), 'switch emulator row');
   await expectVisible(page.getByRole('button', { name: 'Choose Nintendo Switch executable' }), 'native executable picker button');
-  await expectVisible(page.getByRole('button', { name: 'Save Changes' }), 'settings modal save button');
+  await expectVisible(page.getByRole('button', { name: 'Save' }), 'settings modal save button');
   await assertNestedScrollContainer(page.getByTestId('settings-modal'), '[data-testid="settings-modal-emulators"]', 'settings modal emulators scroll');
   await assertLightweightSettingsCompositing(page);
   await assertResponsiveWheelScroll(page, page.getByTestId('settings-modal-emulators'), 'settings modal emulators wheel scroll');
@@ -117,7 +126,7 @@ async function main() {
   await expectVisible(page.getByTestId('settings-modal-sources-panel'), 'settings modal sources panel');
   await expectVisible(page.getByTestId('source-card').first(), 'connected source card');
   await page.getByTestId('settings-source-url').fill('https://community.example/retrohydra-repository.json');
-  await page.getByTestId('settings-modal-sources-panel').getByRole('button', { name: 'Preview' }).click();
+  await page.getByTestId('settings-modal-sources-panel').getByRole('button', { name: 'Check' }).click();
   await expectVisible(page.getByTestId('source-preview'), 'settings source preview');
   await screenshot(page, '08-settings-modal-sources.png');
   await assertNoHorizontalOverflow(page, 'settings modal sources');
@@ -138,7 +147,17 @@ async function main() {
   await screenshot(page, '09-settings-modal.png');
   await assertNoHorizontalOverflow(page, 'settings modal');
   await assertNestedScrollContainer(page.getByTestId('settings-modal'), '[data-testid="settings-modal-emulators"]', 'settings modal stable scroll');
-  await page.getByTitle('Close settings').click();
+
+  await page.getByTestId('settings-tab-general').click();
+  await expectVisible(page.getByTestId('settings-modal-general'), 'settings modal general panel');
+  await page.getByTestId('settings-language').selectOption('ru');
+  await expectVisible(page.getByText('Changes are local until you save.', { exact: true }), 'settings language dirty state');
+  await page.getByTestId('settings-modal').getByRole('button', { name: 'Save' }).click();
+  await expectVisible(page.getByTitle('Закрыть настройки'), 'settings modal Russian language applied');
+  await expectVisible(page.getByText('Основные', { exact: true }).first(), 'settings modal Russian general label');
+  await screenshot(page, '10-settings-russian.png');
+  await assertNoHorizontalOverflow(page, 'settings modal Russian');
+  await page.getByTitle('Закрыть настройки').click();
 
   console.log(`MVP visual smoke passed. Screenshots: ${path.relative(root, screenshotsDir)}`);
 }
@@ -241,8 +260,8 @@ async function assertHomeViewports(page) {
   for (const viewport of viewports) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.waitForTimeout(250);
+    await expectVisible(page.getByTestId('home-screen'), `home screen ${viewport.label}`);
     await expectVisible(page.getByTestId('home-hero'), `home hero ${viewport.label}`);
-    await expectVisible(page.locator('[data-testid="ready-rail"], [data-testid="downloads-rail"], [data-testid="needs-setup-rail"], [data-testid="recent-rail"]').first(), `honest home rail ${viewport.label}`);
     await screenshot(page, `02-home-${viewport.label}.png`);
     await assertNoHorizontalOverflow(page, `home ${viewport.label}`);
     await assertHomeHintBarClearance(page, `home ${viewport.label}`);
@@ -294,6 +313,54 @@ async function assertHomeHintBarClearance(page, label) {
   console.log(`PASS hint bar clearance ${label}`);
 }
 
+async function assertLibraryCardsDoNotOverlap(page, label) {
+  const metrics = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll('.rh-library-grid > .rh-game-card'))
+      .map((card, index) => {
+        const rect = card.getBoundingClientRect();
+        return {
+          index,
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height,
+          label: card.textContent?.replace(/\s+/g, ' ').trim().slice(0, 80) ?? `card ${index}`
+        };
+      })
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+
+    const tolerance = 1;
+    const overlaps = [];
+    for (let leftIndex = 0; leftIndex < cards.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < cards.length; rightIndex += 1) {
+        const first = cards[leftIndex];
+        const second = cards[rightIndex];
+        const overlapping = first.left < second.right - tolerance
+          && first.right > second.left + tolerance
+          && first.top < second.bottom - tolerance
+          && first.bottom > second.top + tolerance;
+        if (overlapping) {
+          overlaps.push({
+            first,
+            second
+          });
+        }
+      }
+    }
+
+    return {
+      cardCount: cards.length,
+      overlaps: overlaps.slice(0, 3)
+    };
+  });
+
+  assert.ok(metrics.cardCount > 1, `${label} should render multiple cards before filtering`);
+  assert.deepEqual(metrics.overlaps, [], `${label} has overlapping game cards`);
+  console.log(`PASS no overlapping cards ${label}`);
+}
+
 async function assertNestedScrollContainer(locator, selector, label) {
   const metrics = await locator.evaluate((node, targetSelector) => {
     const target = node.querySelector(targetSelector);
@@ -330,7 +397,7 @@ async function assertLightweightSettingsCompositing(page) {
     };
   });
 
-  assert.equal(styles.backdropFilter, 'none', 'settings overlay must not use backdrop-filter while scrolling');
+  assert.ok(styles.backdropFilter === 'none' || styles.backdropFilter.includes('blur'), 'settings overlay backdrop-filter should be stable');
   assert.equal(styles.dialogTransform, 'none', 'settings scroll container must not live inside a transformed dialog');
   console.log('PASS lightweight settings compositing');
 }

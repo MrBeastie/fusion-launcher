@@ -8,16 +8,26 @@ export default {
       },
       colors: {
         hydra: {
-          bg: '#0F0F0F',
-          panel: '#17171A',
-          line: '#26262D',
-          accent: '#8B5CF6',
-          cyan: '#22D3EE',
-          green: '#34D399'
+          bg: '#0A0A0B',
+          panel: '#141416',
+          line: '#2A2A2E',
+          accent: '#5CE68C',
+          cyan: '#3BD6C6',
+          green: '#5CE68C'
+        },
+        fusion: {
+          bg: '#0A0A0B',
+          surface: '#141416',
+          raised: '#1E1E21',
+          line: '#2A2A2E',
+          accent: '#5CE68C',
+          accentHover: '#4BD67C',
+          accentActive: '#3FBF6E',
+          accentOn: '#06210F'
         }
       },
       boxShadow: {
-        glow: '0 0 34px rgba(139, 92, 246, 0.28)'
+        glow: '0 12px 30px rgba(92, 230, 140, 0.22)'
       }
     }
   },

@@ -1,19 +1,54 @@
+use std::collections::HashMap;
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+use crate::rom_hasher::RomHashes;
 use crate::schema::{
-    AssetInstallation, AssetView, CatalogGameView, DownloadRecord, EmulatorConfig,
-    ProfileEmulatorConfig, ProfileSystemFileImport, RepositorySchema, RepositorySummary,
-    TorrentDownloadRecord, TrustedExecutable,
+    AssetInstallation, AssetView, CatalogGameView, DownloadRecord, EmulatorConfig, GameArtwork,
+    GameMetadata, ProfileEmulatorConfig, ProfileSystemFileImport, RepositorySchema,
+    RepositorySummary, ScrapeCandidate, ScrapeStateView, ScrapedGamePayload, TorrentDownloadRecord,
+    TrustedExecutable,
 };
 use crate::security::global_id;
 use crate::setup_profiles;
 
 pub struct RepositoryStore {
     conn: Connection,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetadataCacheEntry {
+    pub payload: ScrapedGamePayload,
+    pub match_kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScrapeOverrideRecord {
+    pub provider_game_id: Option<String>,
+    pub payload: Option<ScrapedGamePayload>,
+    pub locked: bool,
+    pub updated_at: String,
+}
+
+pub fn metadata_name_key(platform: &str, title: &str) -> String {
+    let normalized_title = title
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "name:{}:{}",
+        platform.trim().to_lowercase(),
+        normalized_title
+    )
+}
+
+pub fn steamgriddb_cache_key(game_id: &str) -> String {
+    format!("sgdb:{}", game_id.trim())
 }
 
 impl RepositoryStore {
@@ -169,6 +204,42 @@ impl RepositoryStore {
               message TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS rom_hashes (
+              game_id TEXT PRIMARY KEY,
+              crc32 TEXT,
+              md5 TEXT,
+              sha1 TEXT,
+              sha256 TEXT,
+              file_size INTEGER,
+              hashed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS metadata_cache (
+              rom_key TEXT PRIMARY KEY,
+              provider TEXT,
+              payload_json TEXT NOT NULL,
+              match_kind TEXT,
+              fetched_at TEXT,
+              expires_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS scrape_overrides (
+              game_id TEXT PRIMARY KEY,
+              provider_game_id TEXT,
+              payload_json TEXT,
+              locked INTEGER NOT NULL DEFAULT 1,
+              updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS scrape_state (
+              game_id TEXT PRIMARY KEY,
+              status TEXT CHECK(status IN ('pending','hashing','fetching','ready','ambiguous','failed','skipped')),
+              match_kind TEXT,
+              candidates_json TEXT,
+              message TEXT,
+              updated_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS app_config (
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL,
@@ -181,6 +252,8 @@ impl RepositoryStore {
             CREATE INDEX IF NOT EXISTS idx_emulator_configs_status ON emulator_configs(status);
             CREATE INDEX IF NOT EXISTS idx_profile_emulator_configs_status ON profile_emulator_configs(status);
             CREATE INDEX IF NOT EXISTS idx_profile_system_file_imports_status ON profile_system_file_imports(status);
+            CREATE INDEX IF NOT EXISTS idx_metadata_cache_provider ON metadata_cache(provider);
+            CREATE INDEX IF NOT EXISTS idx_scrape_state_status ON scrape_state(status);
             "#,
         )?;
 
@@ -205,8 +278,81 @@ impl RepositoryStore {
         )?;
         self.ensure_column("repositories", "content_hash", "TEXT")?;
         self.ensure_column("repositories", "last_refreshed_at", "TEXT")?;
+        self.migrate_legacy_emulator_configs_inner()?;
 
         Ok(())
+    }
+
+    pub fn migrate_legacy_emulator_configs(&self) -> Result<usize, String> {
+        self.migrate_legacy_emulator_configs_inner()
+            .map_err(|error| error.to_string())
+    }
+
+    fn migrate_legacy_emulator_configs_inner(&self) -> rusqlite::Result<usize> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> rusqlite::Result<usize> {
+            let legacy_configs = {
+                let mut statement = self.conn.prepare(
+                    r#"
+                    SELECT platform, exe_path, status, last_validated_at, version, launch_args_template
+                    FROM emulator_configs
+                    ORDER BY platform
+                    "#,
+                )?;
+                let rows = statement.query_map([], map_emulator_config_row)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+
+            let mut migrated = 0;
+            for config in legacy_configs {
+                let Some(profile) =
+                    setup_profiles::get_default_platform_setup_profile(&config.platform)
+                else {
+                    continue;
+                };
+                let exists = self
+                    .conn
+                    .query_row(
+                        "SELECT 1 FROM profile_emulator_configs WHERE profile_id = ?1",
+                        params![profile.id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                if exists.is_some() {
+                    continue;
+                }
+                self.conn.execute(
+                    r#"
+                    INSERT INTO profile_emulator_configs (
+                      profile_id, platform, exe_path, status, last_validated_at, version, launch_args_template
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "#,
+                    params![
+                        profile.id,
+                        config.platform,
+                        config.exe_path,
+                        config.status,
+                        config.last_validated_at,
+                        config.version,
+                        config.launch_args_template
+                    ],
+                )?;
+                migrated += 1;
+            }
+
+            Ok(migrated)
+        })();
+
+        match result {
+            Ok(migrated) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(migrated)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 
     fn migrate_downloads_schema(&self) -> rusqlite::Result<()> {
@@ -548,6 +694,425 @@ impl RepositoryStore {
         Ok(())
     }
 
+    pub fn upsert_rom_hashes(&self, game_id: &str, hashes: &RomHashes) -> Result<(), String> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO rom_hashes (game_id, crc32, md5, sha1, sha256, file_size, hashed_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(game_id) DO UPDATE SET
+              crc32 = excluded.crc32,
+              md5 = excluded.md5,
+              sha1 = excluded.sha1,
+              sha256 = excluded.sha256,
+              file_size = excluded.file_size,
+              hashed_at = excluded.hashed_at
+            "#,
+                params![
+                    game_id,
+                    hashes.crc32,
+                    hashes.md5,
+                    hashes.sha1,
+                    hashes.sha256,
+                    u64_to_i64(hashes.size),
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn upsert_rom_hash_sha256(
+        &self,
+        game_id: &str,
+        sha256: &str,
+        file_size: u64,
+    ) -> Result<(), String> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO rom_hashes (game_id, sha256, file_size, hashed_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(game_id) DO UPDATE SET
+              sha256 = excluded.sha256,
+              file_size = excluded.file_size,
+              hashed_at = excluded.hashed_at
+            "#,
+                params![game_id, sha256, u64_to_i64(file_size), now],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_rom_crc32(&self, game_id: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT crc32 FROM rom_hashes WHERE game_id = ?1",
+                params![game_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|value| value.flatten().filter(|crc32| !crc32.trim().is_empty()))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn get_metadata_by_key(
+        &self,
+        rom_key: &str,
+        provider: &str,
+    ) -> Result<Option<MetadataCacheEntry>, String> {
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .query_row(
+                r#"
+            SELECT payload_json, match_kind
+            FROM metadata_cache
+            WHERE rom_key = ?1
+              AND provider = ?2
+              AND (expires_at IS NULL OR expires_at > ?3)
+            "#,
+                params![rom_key, provider, now],
+                |row| {
+                    let payload_json: String = row.get(0)?;
+                    let payload = serde_json::from_str::<ScrapedGamePayload>(&payload_json)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                    Ok(MetadataCacheEntry {
+                        payload,
+                        match_kind: row
+                            .get::<_, Option<String>>(1)?
+                            .unwrap_or_else(|| "hash".to_string()),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn put_metadata(
+        &self,
+        rom_key: &str,
+        provider: &str,
+        payload: &ScrapedGamePayload,
+        match_kind: &str,
+    ) -> Result<(), String> {
+        let now = Utc::now();
+        let fetched_at = now.to_rfc3339();
+        let expires_at = (now + Duration::days(30)).to_rfc3339();
+        let payload_json = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO metadata_cache (rom_key, provider, payload_json, match_kind, fetched_at, expires_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(rom_key) DO UPDATE SET
+              provider = excluded.provider,
+              payload_json = excluded.payload_json,
+              match_kind = excluded.match_kind,
+              fetched_at = excluded.fetched_at,
+              expires_at = excluded.expires_at
+            "#,
+                params![rom_key, provider, payload_json, match_kind, fetched_at, expires_at],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_override(&self, game_id: &str) -> Result<Option<ScrapeOverrideRecord>, String> {
+        self.conn
+            .query_row(
+                r#"
+            SELECT provider_game_id, payload_json, locked, updated_at
+            FROM scrape_overrides
+            WHERE game_id = ?1
+            "#,
+                params![game_id],
+                |row| {
+                    let payload_json: Option<String> = row.get(1)?;
+                    let payload = payload_json
+                        .as_deref()
+                        .filter(|json| !json.trim().is_empty() && json.trim() != "null")
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?;
+                    Ok(ScrapeOverrideRecord {
+                        provider_game_id: row.get(0)?,
+                        payload,
+                        locked: row.get::<_, i64>(2)? == 1,
+                        updated_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn put_override(
+        &self,
+        game_id: &str,
+        provider_game_id: &str,
+        payload: &ScrapedGamePayload,
+    ) -> Result<(), String> {
+        let now = Utc::now().to_rfc3339();
+        let payload_json = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO scrape_overrides (game_id, provider_game_id, payload_json, locked, updated_at)
+            VALUES (?1, ?2, ?3, 1, ?4)
+            ON CONFLICT(game_id) DO UPDATE SET
+              provider_game_id = excluded.provider_game_id,
+              payload_json = excluded.payload_json,
+              locked = 1,
+              updated_at = excluded.updated_at
+            "#,
+                params![game_id, provider_game_id, payload_json, now],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_override(&self, game_id: &str) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "DELETE FROM scrape_overrides WHERE game_id = ?1",
+                params![game_id],
+            )
+            .map(|changed| changed > 0)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn get_scrape_state(&self, game_id: &str) -> Result<Option<ScrapeStateView>, String> {
+        self.conn
+            .query_row(
+                r#"
+            SELECT game_id, status, match_kind, candidates_json, message, updated_at
+            FROM scrape_state
+            WHERE game_id = ?1
+            "#,
+                params![game_id],
+                map_scrape_state_row,
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_scrape_state(
+        &self,
+        game_id: &str,
+        status: &str,
+        match_kind: Option<&str>,
+        candidates: &[ScrapeCandidate],
+        message: Option<&str>,
+    ) -> Result<ScrapeStateView, String> {
+        let now = Utc::now().to_rfc3339();
+        let candidates_json =
+            serde_json::to_string(candidates).map_err(|error| error.to_string())?;
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO scrape_state (game_id, status, match_kind, candidates_json, message, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(game_id) DO UPDATE SET
+              status = excluded.status,
+              match_kind = excluded.match_kind,
+              candidates_json = excluded.candidates_json,
+              message = excluded.message,
+              updated_at = excluded.updated_at
+            "#,
+                params![game_id, status, match_kind, candidates_json, message, now],
+            )
+            .map_err(|error| error.to_string())?;
+
+        self.get_scrape_state(game_id)?
+            .ok_or_else(|| "Scrape state was not persisted.".to_string())
+    }
+
+    pub fn delete_scrape_artifacts(&self, game_id: &str) -> Result<bool, String> {
+        let mut changed = false;
+        changed = self
+            .conn
+            .execute(
+                "DELETE FROM rom_hashes WHERE game_id = ?1",
+                params![game_id],
+            )
+            .map_err(|error| error.to_string())?
+            > 0
+            || changed;
+        changed = self
+            .conn
+            .execute(
+                "DELETE FROM scrape_state WHERE game_id = ?1",
+                params![game_id],
+            )
+            .map_err(|error| error.to_string())?
+            > 0
+            || changed;
+        changed = self
+            .conn
+            .execute(
+                "DELETE FROM scrape_overrides WHERE game_id = ?1",
+                params![game_id],
+            )
+            .map_err(|error| error.to_string())?
+            > 0
+            || changed;
+        Ok(changed)
+    }
+
+    pub fn consume_screenscraper_request(&self, daily_limit: u32) -> Result<u32, String> {
+        let today = Utc::now().date_naive().to_string();
+        let configured_day = self.get_config("screenscraper.request_day")?;
+        let mut count = if configured_day.as_deref() == Some(today.as_str()) {
+            self.get_config("screenscraper.request_count")?
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        if count >= daily_limit {
+            return Err(format!(
+                "ScreenScraper daily request limit reached: {count}/{daily_limit}"
+            ));
+        }
+
+        count += 1;
+        self.set_config("screenscraper.request_day", &today)?;
+        self.set_config("screenscraper.request_count", &count.to_string())?;
+        Ok(count)
+    }
+
+    pub fn get_screenscraper_request_count(&self) -> Result<u32, String> {
+        let today = Utc::now().date_naive().to_string();
+        if self.get_config("screenscraper.request_day")?.as_deref() != Some(today.as_str()) {
+            return Ok(0);
+        }
+        Ok(self
+            .get_config("screenscraper.request_count")?
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn consume_steamgriddb_request(&self, daily_limit: u32) -> Result<u32, String> {
+        let today = Utc::now().date_naive().to_string();
+        let configured_day = self.get_config("steamgriddb.request_day")?;
+        let mut count = if configured_day.as_deref() == Some(today.as_str()) {
+            self.get_config("steamgriddb.request_count")?
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        if count >= daily_limit {
+            return Err(format!(
+                "SteamGridDB daily request limit reached: {count}/{daily_limit}"
+            ));
+        }
+
+        count += 1;
+        self.set_config("steamgriddb.request_day", &today)?;
+        self.set_config("steamgriddb.request_count", &count.to_string())?;
+        Ok(count)
+    }
+
+    pub fn get_steamgriddb_request_count(&self) -> Result<u32, String> {
+        let today = Utc::now().date_naive().to_string();
+        if self.get_config("steamgriddb.request_day")?.as_deref() != Some(today.as_str()) {
+            return Ok(0);
+        }
+        Ok(self
+            .get_config("steamgriddb.request_count")?
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn mark_installed_games_pending_for_scrape(&self) -> Result<usize, String> {
+        let mut statement = self
+            .conn
+            .prepare(
+                r#"
+            SELECT DISTINCT g.id
+            FROM catalog_games g
+            LEFT JOIN downloads d
+              ON d.subject_id = g.id
+             AND d.subject_type = 'game'
+             AND d.status IN ('ready', 'completed')
+             AND d.local_path IS NOT NULL
+             AND TRIM(d.local_path) <> ''
+            LEFT JOIN torrent_downloads t
+              ON t.game_id = g.id
+             AND t.status = 'completed'
+            WHERE d.subject_id IS NOT NULL OR t.game_id IS NOT NULL
+            ORDER BY g.title
+            "#,
+            )
+            .map_err(|error| error.to_string())?;
+        let game_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
+
+        for game_id in &game_ids {
+            self.set_scrape_state(
+                game_id,
+                "pending",
+                None,
+                &[],
+                Some("Queued for library metadata scrape."),
+            )?;
+        }
+
+        Ok(game_ids.len())
+    }
+
+    pub fn list_pending_scrape_game_ids(&self) -> Result<Vec<String>, String> {
+        let mut statement = self
+            .conn
+            .prepare(
+                r#"
+            SELECT s.game_id
+            FROM scrape_state s
+            JOIN catalog_games g ON g.id = s.game_id
+            WHERE s.status = 'pending'
+            ORDER BY s.updated_at, g.title
+            "#,
+            )
+            .map_err(|error| error.to_string())?;
+        let game_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
+        Ok(game_ids)
+    }
+
+    pub fn count_pending_scrape_states(&self) -> Result<usize, String> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM scrape_state WHERE status = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count.max(0) as usize)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn get_repository_url(&self, repository_id: &str) -> Result<Option<String>, String> {
         self.conn
             .query_row(
@@ -560,10 +1125,11 @@ impl RepositoryStore {
     }
 
     pub fn get_catalog(&self) -> Result<Vec<CatalogGameView>, String> {
-        let mut statement = self
-            .conn
-            .prepare(
-                r#"
+        let mut games = {
+            let mut statement = self
+                .conn
+                .prepare(
+                    r#"
             SELECT
               g.id, g.source_id, g.repository_id, r.name, g.platform, g.title, g.description,
               g.cover_image_url, g.trailer_url, g.artwork_json, g.metadata_json, g.content_mode,
@@ -573,18 +1139,159 @@ impl RepositoryStore {
             JOIN repositories r ON r.id = g.repository_id
             ORDER BY r.name, g.title
             "#,
-            )
+                )
+                .map_err(|error| error.to_string())?;
+
+            let rows = statement
+                .query_map([], map_game_row)
+                .map_err(|error| error.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?
+        };
+
+        self.enrich_games_batch(&mut games)?;
+
+        Ok(games)
+    }
+
+    /// Enriches a whole catalog page with scraped/override metadata using a
+    /// fixed number of queries (three table scans + in-memory joins) instead of
+    /// the ~5 per-game lookups in [`Self::enrich_game_with_scraped`]. For large
+    /// catalogs this turns an O(N) query storm into O(1).
+    fn enrich_games_batch(&self, views: &mut [CatalogGameView]) -> Result<(), String> {
+        if views.is_empty() {
+            return Ok(());
+        }
+
+        let crc32_by_game = self.load_all_rom_crc32()?;
+        let metadata_by_key = self.load_all_metadata_cache()?;
+        let override_by_game = self.load_all_overrides()?;
+
+        for view in views.iter_mut() {
+            let scraped = crc32_by_game
+                .get(&view.id)
+                .and_then(|crc32| {
+                    metadata_by_key.get(&("screenscraper".to_string(), crc32.clone()))
+                })
+                .or_else(|| {
+                    metadata_by_key.get(&(
+                        "screenscraper".to_string(),
+                        metadata_name_key(&view.platform, &view.title),
+                    ))
+                });
+            let steamgriddb =
+                metadata_by_key.get(&("steamgriddb".to_string(), steamgriddb_cache_key(&view.id)));
+            let override_ = override_by_game
+                .get(&view.id)
+                .and_then(|payload| payload.as_ref());
+
+            enrich_with_scraped(
+                view,
+                scraped.map(|entry| &entry.payload),
+                steamgriddb.map(|entry| &entry.payload),
+                override_,
+            );
+        }
+
+        Ok(())
+    }
+
+    fn load_all_rom_crc32(&self) -> Result<HashMap<String, String>, String> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT game_id, crc32 FROM rom_hashes")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
             .map_err(|error| error.to_string())?;
 
-        let rows = statement
-            .query_map([], map_game_row)
+        let mut map = HashMap::new();
+        for row in rows {
+            let (game_id, crc32) = row.map_err(|error| error.to_string())?;
+            if let Some(crc32) = crc32 {
+                if !crc32.trim().is_empty() {
+                    map.insert(game_id, crc32);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    fn load_all_metadata_cache(
+        &self,
+    ) -> Result<HashMap<(String, String), MetadataCacheEntry>, String> {
+        let now = Utc::now().to_rfc3339();
+        let mut statement = self
+            .conn
+            .prepare(
+                r#"
+            SELECT rom_key, provider, payload_json, match_kind
+            FROM metadata_cache
+            WHERE expires_at IS NULL OR expires_at > ?1
+            "#,
+            )
             .map_err(|error| error.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| error.to_string())
+        let rows = statement
+            .query_map(params![now], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let (rom_key, provider, payload_json, match_kind) =
+                row.map_err(|error| error.to_string())?;
+            let Some(provider) = provider else {
+                continue;
+            };
+            // Best-effort: skip unparseable rows, matching per-game tolerance.
+            let Ok(payload) = serde_json::from_str::<ScrapedGamePayload>(&payload_json) else {
+                continue;
+            };
+            map.insert(
+                (provider, rom_key),
+                MetadataCacheEntry {
+                    payload,
+                    match_kind: match_kind.unwrap_or_else(|| "hash".to_string()),
+                },
+            );
+        }
+        Ok(map)
+    }
+
+    fn load_all_overrides(&self) -> Result<HashMap<String, Option<ScrapedGamePayload>>, String> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT game_id, payload_json FROM scrape_overrides")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let (game_id, payload_json) = row.map_err(|error| error.to_string())?;
+            let payload = payload_json
+                .as_deref()
+                .filter(|json| !json.trim().is_empty() && json.trim() != "null")
+                .and_then(|json| serde_json::from_str::<ScrapedGamePayload>(json).ok());
+            map.insert(game_id, payload);
+        }
+        Ok(map)
     }
 
     pub fn get_game(&self, game_id: &str) -> Result<Option<CatalogGameView>, String> {
-        self.conn
+        let mut game = self
+            .conn
             .query_row(
                 r#"
             SELECT
@@ -600,7 +1307,43 @@ impl RepositoryStore {
                 map_game_row,
             )
             .optional()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+
+        if let Some(game) = game.as_mut() {
+            self.enrich_game_with_scraped(game)?;
+        }
+
+        Ok(game)
+    }
+
+    fn enrich_game_with_scraped(&self, view: &mut CatalogGameView) -> Result<(), String> {
+        let scraped = self.get_scraped_payload_for_game(view)?;
+        let steamgriddb =
+            self.get_metadata_by_key(&steamgriddb_cache_key(&view.id), "steamgriddb")?;
+        let override_ = self.get_override(&view.id)?;
+        enrich_with_scraped(
+            view,
+            scraped.as_ref().map(|entry| &entry.payload),
+            steamgriddb.as_ref().map(|entry| &entry.payload),
+            override_.as_ref().and_then(|entry| entry.payload.as_ref()),
+        );
+        Ok(())
+    }
+
+    fn get_scraped_payload_for_game(
+        &self,
+        view: &CatalogGameView,
+    ) -> Result<Option<MetadataCacheEntry>, String> {
+        if let Some(crc32) = self.get_rom_crc32(&view.id)? {
+            if let Some(entry) = self.get_metadata_by_key(&crc32, "screenscraper")? {
+                return Ok(Some(entry));
+            }
+        }
+
+        self.get_metadata_by_key(
+            &metadata_name_key(&view.platform, &view.title),
+            "screenscraper",
+        )
     }
 
     pub fn get_asset(&self, asset_id: &str) -> Result<Option<AssetView>, String> {
@@ -1013,6 +1756,27 @@ impl RepositoryStore {
         Ok(record)
     }
 
+    /// Runs `body` inside a single SQLite transaction so multi-statement writes
+    /// either fully apply or fully roll back, preventing partial/ghost records
+    /// if the process dies mid-write.
+    fn in_transaction<T>(&self, body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|error| error.to_string())?;
+        match body() {
+            Ok(value) => {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(|error| error.to_string())?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn record_direct_game_download_started(
         &self,
         game_id: &str,
@@ -1067,9 +1831,16 @@ impl RepositoryStore {
         total_bytes: u64,
         error: &str,
     ) -> Result<TorrentDownloadRecord, String> {
-        self.record_download(game_id, "game", None, None, Some(error))?;
-        self.record_direct_game_download_started(game_id, source_kind, target_path, total_bytes)?;
-        self.set_torrent_status(game_id, "error", Some(error))
+        self.in_transaction(|| {
+            self.record_download(game_id, "game", None, None, Some(error))?;
+            self.record_direct_game_download_started(
+                game_id,
+                source_kind,
+                target_path,
+                total_bytes,
+            )?;
+            self.set_torrent_status(game_id, "error", Some(error))
+        })
     }
 
     pub fn record_direct_game_download_completed(
@@ -1080,20 +1851,27 @@ impl RepositoryStore {
         sha256: &str,
         total_bytes: u64,
     ) -> Result<(DownloadRecord, TorrentDownloadRecord), String> {
-        let download =
-            self.record_download(game_id, "game", Some(local_path), Some(sha256), None)?;
-        self.record_direct_game_download_started(game_id, source_kind, local_path, total_bytes)?;
-        let torrent = self.update_torrent_progress(
-            game_id,
-            "completed",
-            100.0,
-            total_bytes,
-            total_bytes,
-            0,
-            0,
-            0,
-        )?;
-        Ok((download, torrent))
+        self.in_transaction(|| {
+            let download =
+                self.record_download(game_id, "game", Some(local_path), Some(sha256), None)?;
+            self.record_direct_game_download_started(
+                game_id,
+                source_kind,
+                local_path,
+                total_bytes,
+            )?;
+            let torrent = self.update_torrent_progress(
+                game_id,
+                "completed",
+                100.0,
+                total_bytes,
+                total_bytes,
+                0,
+                0,
+                0,
+            )?;
+            Ok((download, torrent))
+        })
     }
 
     pub fn trust_executable(
@@ -1147,37 +1925,25 @@ impl RepositoryStore {
     }
 
     pub fn list_emulator_configs(&self) -> Result<Vec<EmulatorConfig>, String> {
-        let mut statement = self
-            .conn
-            .prepare(
-                r#"
-            SELECT platform, exe_path, status, last_validated_at, version, launch_args_template
-            FROM emulator_configs
-            ORDER BY platform
-            "#,
-            )
-            .map_err(|error| error.to_string())?;
-
-        let rows = statement
-            .query_map([], map_emulator_config_row)
-            .map_err(|error| error.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| error.to_string())
+        Ok(self
+            .list_profile_emulator_configs()?
+            .into_iter()
+            .filter(|config| {
+                setup_profiles::get_default_platform_setup_profile(&config.platform)
+                    .map(|profile| profile.id == config.profile_id)
+                    .unwrap_or(false)
+            })
+            .map(emulator_config_from_profile)
+            .collect())
     }
 
     pub fn get_emulator_config(&self, platform: &str) -> Result<Option<EmulatorConfig>, String> {
-        self.conn
-            .query_row(
-                r#"
-            SELECT platform, exe_path, status, last_validated_at, version, launch_args_template
-            FROM emulator_configs
-            WHERE platform = ?1
-            "#,
-                params![platform],
-                map_emulator_config_row,
-            )
-            .optional()
-            .map_err(|error| error.to_string())
+        let Some(profile) = setup_profiles::get_default_platform_setup_profile(platform) else {
+            return Ok(None);
+        };
+        Ok(self
+            .get_profile_emulator_config(&profile.id)?
+            .map(emulator_config_from_profile))
     }
 
     pub fn get_emulator_exe_path(
@@ -1185,20 +1951,16 @@ impl RepositoryStore {
         platform: &str,
         profile_id: Option<&str>,
     ) -> Result<Option<std::path::PathBuf>, String> {
-        let profile_path = match profile_id {
+        let path = match profile_id {
             Some(profile_id) => self
                 .get_profile_emulator_config(profile_id)?
                 .filter(|config| config.status == "valid")
                 .and_then(|config| config.exe_path),
-            None => None,
-        };
-        let path = profile_path.or_else(|| {
-            self.get_emulator_config(platform)
-                .ok()
-                .flatten()
+            None => self
+                .get_emulator_config(platform)?
                 .filter(|config| config.status == "valid")
-                .and_then(|config| config.exe_path)
-        });
+                .and_then(|config| config.exe_path),
+        };
 
         Ok(path
             .map(std::path::PathBuf::from)
@@ -1221,41 +1983,28 @@ impl RepositoryStore {
         version: Option<&str>,
         launch_args_template: Option<&str>,
     ) -> Result<EmulatorConfig, String> {
-        let now = Utc::now().to_rfc3339();
-        self.conn
-            .execute(
-                r#"
-            INSERT INTO emulator_configs (
-              platform, exe_path, status, last_validated_at, version, launch_args_template
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(platform) DO UPDATE SET
-              exe_path = excluded.exe_path,
-              status = excluded.status,
-              last_validated_at = excluded.last_validated_at,
-              version = excluded.version,
-              launch_args_template = excluded.launch_args_template
-            "#,
-                params![
-                    platform,
-                    exe_path,
-                    status,
-                    now,
-                    version,
-                    launch_args_template
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-
-        self.get_emulator_config(platform)?
-            .ok_or_else(|| "Emulator config was not persisted.".to_string())
+        let profile = setup_profiles::get_default_platform_setup_profile(platform)
+            .ok_or_else(|| format!("No default setup profile is registered for {platform}"))?;
+        let config = self.upsert_profile_emulator_config(
+            &profile.id,
+            &profile.platform,
+            exe_path,
+            status,
+            version,
+            launch_args_template,
+        )?;
+        Ok(emulator_config_from_profile(config))
     }
 
     pub fn delete_emulator_config(&self, platform: &str) -> Result<bool, String> {
+        let Some(profile) = setup_profiles::get_default_platform_setup_profile(platform) else {
+            return Ok(false);
+        };
         let changed = self
             .conn
             .execute(
-                "DELETE FROM emulator_configs WHERE platform = ?1",
-                params![platform],
+                "DELETE FROM profile_emulator_configs WHERE profile_id = ?1",
+                params![profile.id],
             )
             .map_err(|error| error.to_string())?;
         Ok(changed > 0)
@@ -1518,6 +2267,219 @@ impl RepositoryStore {
     }
 }
 
+fn map_scrape_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScrapeStateView> {
+    let candidates_json: Option<String> = row.get(3)?;
+    let candidates = candidates_json
+        .as_deref()
+        .filter(|json| !json.trim().is_empty() && json.trim() != "null")
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?
+        .unwrap_or_default();
+
+    Ok(ScrapeStateView {
+        game_id: row.get(0)?,
+        status: row.get(1)?,
+        match_kind: row.get(2)?,
+        candidates,
+        message: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn enrich_with_scraped(
+    view: &mut CatalogGameView,
+    scraped: Option<&ScrapedGamePayload>,
+    steamgriddb: Option<&ScrapedGamePayload>,
+    override_: Option<&ScrapedGamePayload>,
+) {
+    if let Some(payload) = scraped {
+        apply_payload(view, payload, false);
+    }
+    if let Some(payload) = steamgriddb {
+        apply_payload(view, payload, false);
+    }
+    if let Some(payload) = override_ {
+        apply_payload(view, payload, true);
+    }
+}
+
+fn apply_payload(view: &mut CatalogGameView, payload: &ScrapedGamePayload, replace_existing: bool) {
+    if let Some(description) = payload
+        .description
+        .as_deref()
+        .filter(|value| !is_blank(value))
+    {
+        if replace_existing || view.description.as_deref().map(is_blank).unwrap_or(true) {
+            view.description = Some(description.to_string());
+        }
+    }
+
+    if let Some(cover) = payload.cover.as_deref().filter(|value| !is_blank(value)) {
+        let source_has_cover = view
+            .artwork
+            .as_ref()
+            .and_then(|artwork| artwork.cover.as_deref())
+            .map(|value| !is_blank(value))
+            .unwrap_or(false)
+            || view
+                .cover_image_url
+                .as_deref()
+                .map(|value| !is_blank(value))
+                .unwrap_or(false);
+        if replace_existing || !source_has_cover {
+            let artwork = view.artwork.get_or_insert_with(empty_artwork);
+            artwork.cover = Some(cover.to_string());
+            if replace_existing
+                || view
+                    .cover_image_url
+                    .as_deref()
+                    .map(is_blank)
+                    .unwrap_or(true)
+            {
+                view.cover_image_url = Some(cover.to_string());
+            }
+        }
+    }
+
+    if let Some(hero) = payload.hero.as_deref().filter(|value| !is_blank(value)) {
+        let source_has_hero = view
+            .artwork
+            .as_ref()
+            .and_then(|artwork| artwork.hero.as_deref())
+            .map(|value| !is_blank(value))
+            .unwrap_or(false);
+        if replace_existing || !source_has_hero {
+            let artwork = view.artwork.get_or_insert_with(empty_artwork);
+            artwork.hero = Some(hero.to_string());
+        }
+    }
+
+    if let Some(logo) = payload.logo.as_deref().filter(|value| !is_blank(value)) {
+        let source_has_logo = view
+            .artwork
+            .as_ref()
+            .and_then(|artwork| artwork.logo.as_deref())
+            .map(|value| !is_blank(value))
+            .unwrap_or(false);
+        if replace_existing || !source_has_logo {
+            let artwork = view.artwork.get_or_insert_with(empty_artwork);
+            artwork.logo = Some(logo.to_string());
+        }
+    }
+
+    let screenshots = payload
+        .screenshots
+        .iter()
+        .filter(|value| !is_blank(value))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !screenshots.is_empty() {
+        let source_has_screenshots = view
+            .artwork
+            .as_ref()
+            .map(|artwork| artwork.screenshots.iter().any(|value| !is_blank(value)))
+            .unwrap_or(false);
+        if replace_existing || !source_has_screenshots {
+            let artwork = view.artwork.get_or_insert_with(empty_artwork);
+            artwork.screenshots = screenshots;
+        }
+    }
+
+    merge_metadata(view, &payload.metadata, replace_existing);
+}
+
+fn merge_metadata(view: &mut CatalogGameView, scraped: &GameMetadata, replace_existing: bool) {
+    let metadata = view.metadata.get_or_insert_with(empty_metadata);
+
+    if replace_existing || metadata.release_year.is_none() {
+        metadata.release_year = scraped.release_year.or(metadata.release_year);
+    }
+    merge_string_field(
+        &mut metadata.developer,
+        scraped.developer.as_deref(),
+        replace_existing,
+    );
+    merge_string_field(
+        &mut metadata.publisher,
+        scraped.publisher.as_deref(),
+        replace_existing,
+    );
+    merge_string_field(
+        &mut metadata.players,
+        scraped.players.as_deref(),
+        replace_existing,
+    );
+    merge_string_field(
+        &mut metadata.series,
+        scraped.series.as_deref(),
+        replace_existing,
+    );
+
+    if replace_existing {
+        if !scraped.genres.is_empty() {
+            metadata.genres = scraped.genres.clone();
+        }
+        if !scraped.tags.is_empty() {
+            metadata.tags = scraped.tags.clone();
+        }
+    } else {
+        if metadata.genres.is_empty() {
+            metadata.genres = scraped.genres.clone();
+        }
+        if metadata.tags.is_empty() {
+            metadata.tags = scraped.tags.clone();
+        }
+    }
+
+    for (key, value) in &scraped.external_ids {
+        if replace_existing || !metadata.external_ids.contains_key(key) {
+            metadata.external_ids.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn merge_string_field(target: &mut Option<String>, incoming: Option<&str>, replace_existing: bool) {
+    let Some(incoming) = incoming.filter(|value| !is_blank(value)) else {
+        return;
+    };
+    if replace_existing || target.as_deref().map(is_blank).unwrap_or(true) {
+        *target = Some(incoming.to_string());
+    }
+}
+
+fn empty_artwork() -> GameArtwork {
+    GameArtwork {
+        cover: None,
+        hero: None,
+        logo: None,
+        screenshots: Vec::new(),
+    }
+}
+
+fn empty_metadata() -> GameMetadata {
+    GameMetadata {
+        release_year: None,
+        developer: None,
+        publisher: None,
+        genres: Vec::new(),
+        tags: Vec::new(),
+        players: None,
+        series: None,
+        external_ids: std::collections::BTreeMap::new(),
+    }
+}
+
+fn is_blank(value: &str) -> bool {
+    value.trim().is_empty()
+}
+
 fn map_game_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogGameView> {
     let artwork_json: Option<String> = row.get(9)?;
     let metadata_json: Option<String> = row.get(10)?;
@@ -1672,6 +2634,17 @@ fn map_profile_emulator_config_row(
     })
 }
 
+fn emulator_config_from_profile(config: ProfileEmulatorConfig) -> EmulatorConfig {
+    EmulatorConfig {
+        platform: config.platform,
+        exe_path: config.exe_path,
+        status: config.status,
+        last_validated_at: config.last_validated_at,
+        version: config.version,
+        launch_args_template: config.launch_args_template,
+    }
+}
+
 fn map_asset_installation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetInstallation> {
     Ok(AssetInstallation {
         asset_id: row.get(0)?,
@@ -1735,7 +2708,7 @@ mod tests {
 
     use super::*;
     use crate::schema::{
-        AssetKind, RepositoryAsset, RepositoryGame, RepositoryMetadata, SourceUri,
+        AssetKind, GameArtwork, RepositoryAsset, RepositoryGame, RepositoryMetadata, SourceUri,
     };
 
     fn test_repo() -> RepositorySchema {
@@ -1788,6 +2761,78 @@ mod tests {
         }
     }
 
+    fn catalog_view_with_artwork(artwork: Option<GameArtwork>) -> CatalogGameView {
+        CatalogGameView {
+            id: "repo::game".to_string(),
+            source_id: "game".to_string(),
+            repository_id: "repo".to_string(),
+            repository_name: "Repo".to_string(),
+            platform: "nes".to_string(),
+            title: "Game".to_string(),
+            description: None,
+            cover_image_url: None,
+            trailer_url: None,
+            artwork,
+            metadata: None,
+            content_mode: None,
+            setup_profile_id: None,
+            downloads: Vec::new(),
+            expected_extensions: vec![".nes".to_string()],
+            required_system_file_ids: Vec::new(),
+            launch: None,
+        }
+    }
+
+    fn artwork_payload(hero: &str, logo: &str, screenshot: &str) -> ScrapedGamePayload {
+        ScrapedGamePayload {
+            provider: "test".to_string(),
+            provider_game_id: Some("1".to_string()),
+            title: Some("Game".to_string()),
+            description: None,
+            cover: None,
+            hero: Some(hero.to_string()),
+            logo: Some(logo.to_string()),
+            screenshots: vec![screenshot.to_string()],
+            metadata: empty_metadata(),
+        }
+    }
+
+    #[test]
+    fn scraped_artwork_does_not_replace_source_artwork() {
+        let mut view = catalog_view_with_artwork(Some(GameArtwork {
+            cover: None,
+            hero: Some("source-hero".to_string()),
+            logo: Some("source-logo".to_string()),
+            screenshots: vec!["source-shot".to_string()],
+        }));
+        let payload = artwork_payload("scraped-hero", "scraped-logo", "scraped-shot");
+
+        apply_payload(&mut view, &payload, false);
+
+        let artwork = view.artwork.unwrap();
+        assert_eq!(artwork.hero.as_deref(), Some("source-hero"));
+        assert_eq!(artwork.logo.as_deref(), Some("source-logo"));
+        assert_eq!(artwork.screenshots, vec!["source-shot".to_string()]);
+    }
+
+    #[test]
+    fn override_artwork_replaces_existing_artwork() {
+        let mut view = catalog_view_with_artwork(Some(GameArtwork {
+            cover: None,
+            hero: Some("source-hero".to_string()),
+            logo: Some("source-logo".to_string()),
+            screenshots: vec!["source-shot".to_string()],
+        }));
+        let payload = artwork_payload("override-hero", "override-logo", "override-shot");
+
+        apply_payload(&mut view, &payload, true);
+
+        let artwork = view.artwork.unwrap();
+        assert_eq!(artwork.hero.as_deref(), Some("override-hero"));
+        assert_eq!(artwork.logo.as_deref(), Some("override-logo"));
+        assert_eq!(artwork.screenshots, vec!["override-shot".to_string()]);
+    }
+
     #[test]
     fn stores_and_reads_repository_catalog() {
         let dir = tempdir().unwrap();
@@ -1806,6 +2851,41 @@ mod tests {
         assert_eq!(
             store.get_catalog().unwrap()[0].expected_extensions,
             vec![".nes".to_string()]
+        );
+    }
+
+    #[test]
+    fn batched_catalog_enrichment_matches_per_game_path() {
+        let dir = tempdir().unwrap();
+        let mut store = RepositoryStore::open(&dir.path().join("retrohydra.db")).unwrap();
+        store
+            .store_repository("https://example.com/index.json", &test_repo())
+            .unwrap();
+
+        // Seed scraped metadata (by name key) and an override for the one game.
+        store
+            .put_metadata(
+                &metadata_name_key("nes", "Game"),
+                "screenscraper",
+                &artwork_payload("scraped-hero", "scraped-logo", "scraped-shot"),
+                "name",
+            )
+            .unwrap();
+        store
+            .put_override(
+                "repo::game",
+                "provider-1",
+                &artwork_payload("override-hero", "override-logo", "override-shot"),
+            )
+            .unwrap();
+
+        // The batched get_catalog path must produce byte-identical enrichment to
+        // the per-game get_game path.
+        let batched = store.get_catalog().unwrap();
+        let per_game = store.get_game("repo::game").unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&batched[0]).unwrap(),
+            serde_json::to_value(&per_game).unwrap()
         );
     }
 
@@ -1837,6 +2917,53 @@ mod tests {
 
         assert!(store.delete_emulator_config("nes").unwrap());
         assert!(store.get_emulator_config("nes").unwrap().is_none());
+    }
+
+    #[test]
+    fn migrates_legacy_emulator_configs_to_default_profiles() {
+        let dir = tempdir().unwrap();
+        let store = RepositoryStore::open(&dir.path().join("retrohydra.db")).unwrap();
+        let exe_path = dir.path().join("Mesen.exe");
+        std::fs::write(&exe_path, b"exe").unwrap();
+        let exe_path = exe_path.to_string_lossy().to_string();
+
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO emulator_configs (
+                  platform, exe_path, status, last_validated_at, version, launch_args_template
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+                rusqlite::params![
+                    "nes",
+                    exe_path.as_str(),
+                    "valid",
+                    "2026-06-09T00:00:00Z",
+                    "2.1.1",
+                    "{game_path}"
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(store.migrate_legacy_emulator_configs().unwrap(), 1);
+        assert_eq!(store.migrate_legacy_emulator_configs().unwrap(), 0);
+
+        let profile = store
+            .get_profile_emulator_config("nes-mesen")
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.platform, "nes");
+        assert_eq!(profile.status, "valid");
+        assert_eq!(profile.version.as_deref(), Some("2.1.1"));
+        assert_eq!(profile.launch_args_template.as_deref(), Some("{game_path}"));
+        assert_eq!(
+            store
+                .get_emulator_exe_path("nes", Some("nes-mesen"))
+                .unwrap()
+                .as_deref(),
+            Some(std::path::Path::new(&exe_path))
+        );
     }
 
     #[test]

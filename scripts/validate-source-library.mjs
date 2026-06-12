@@ -6,6 +6,11 @@ import { repositorySchema } from '../src/types/repository.ts';
 const BUILT_IN_REPOSITORY_IDS = new Set(['retrohydra-demo']);
 const BUILT_IN_SETUP_PROFILE_IDS = new Set([
   'nes-mesen',
+  'snes-mesen',
+  'n64-rmg',
+  'gba-mgba',
+  'ps2-pcsx2',
+  'psp-ppsspp',
   'ps1-manual',
   'switch-manual',
   'snes-manual',

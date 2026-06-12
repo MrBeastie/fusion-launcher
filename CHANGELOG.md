@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.2.0
+
+Automatic metadata and artwork scraping.
+
+### Added
+
+- ScreenScraper integration: hash-based (CRC32) and name-based matching to fill missing title, description, year, developer, publisher, genres, and cover art after imports. Uses the player's own ScreenScraper account, stored locally.
+- One-pass ROM hashing (CRC32/MD5/SHA1/SHA256) with streaming progress, skipped for directory-based, `.chd`/`.cso`/`.cue`/`.gdi`/`.m3u`/`.pbp`/`.rvz`, and metadata-only titles.
+- SteamGridDB artwork enrichment for hero and logo images, with an optional built-in app key and a per-user key fallback.
+- Region and language preferences for scraped metadata and artwork selection.
+- Ambiguous-match disambiguation and manual metadata override per game, with overrides that survive catalog refreshes.
+- "Scrape entire library" batch job with a resumable, cancelable queue and progress reporting.
+- Scraped metadata is cached locally with a 30-day TTL and merged under a strict priority: source catalog over scraped, manual override over both.
+- Per-provider daily request budgets to respect ScreenScraper and SteamGridDB rate limits.
+
+### Notes
+
+- Scraped metadata and artwork are fetched directly from the provider to the user's machine and cached locally; RetroHydra does not proxy or redistribute them.
+- ScreenScraper credentials and the optional SteamGridDB key are stored locally in app config; treat the machine profile as the trust boundary.
+- Official builds may bake a SteamGridDB key and ScreenScraper developer credentials at compile time via release secrets; when absent, scraping falls back to per-user credentials.
+
 ## v0.1.0
 
 RetroHydra MVP release candidate.

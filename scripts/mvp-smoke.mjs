@@ -42,11 +42,11 @@ await check('one-click NES demo setup path', async () => {
   await previewApi.deleteEmulatorConfig('nes');
   await previewApi.removeGame('retrohydra_nes_smoke', true);
 
-  const before = await previewApi.getRecommendedEmulators();
-  assert.equal(before.find((emulator) => emulator.platform === 'nes')?.status, 'available');
+  const before = await previewApi.getEmulatorStatus('nes');
+  assert.equal(before.installed, false);
 
-  const emulator = await previewApi.installRecommendedEmulator('nes');
-  assert.equal(emulator.status, 'valid');
+  const emulator = await previewApi.installEmulator('nes');
+  assert.equal(emulator.profileId, 'nes-mesen');
 
   const download = await previewApi.startGameDownload('retrohydra_nes_smoke');
   assert.equal(download.sourceKind, 'bundled');
@@ -59,7 +59,7 @@ await check('one-click NES demo setup path', async () => {
   assert.equal(setup.launch.status, 'ready');
 
   const launch = await previewApi.launchGame('retrohydra_nes_smoke');
-  assert.equal(launch.executable, 'preview://emulators/Mesen2-2.1.1/Mesen.exe');
+  assert.equal(launch.executable, 'preview://emulators/nes/Mesen.exe');
   assert.ok(launch.resolvedGamePath.includes('retrohydra_nes_smoke'));
 
   return `${download.sourceKind} download -> ${launch.executable}`;

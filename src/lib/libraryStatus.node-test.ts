@@ -26,12 +26,14 @@ const configuredSettings = {
   emulators: {
     nes: 'C:/Emulators/nes.exe'
   },
-  emulatorConfigs: {}
+  emulatorConfigs: {},
+  language: 'en'
 };
 
 const emptySettings = {
   emulators: {},
-  emulatorConfigs: {}
+  emulatorConfigs: {},
+  language: 'en'
 };
 
 function status(overrides = {}) {
@@ -120,7 +122,7 @@ describe('library status derivation', () => {
     assert.equal(item.readyToPlay, false);
     assert.equal(item.primaryAction, 'details');
     assert.equal(item.statusLabel, 'Missing Requirements');
-    assert.deepEqual(item.missingRequirements, ['Configure NES / Famicom emulator']);
+    assert.deepEqual(item.missingRequirements, ['Set up NES / Famicom emulator']);
   });
 
   it('preserves missing system file requirements', () => {

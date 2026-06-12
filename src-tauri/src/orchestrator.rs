@@ -1,14 +1,12 @@
-use std::fs::{self, File};
-use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
-use zip::ZipArchive;
 
+use crate::archive;
 use crate::commands;
 use crate::emulator_profiles::{
     load_emulator_profile, EmulatorInstallResult, EmulatorProfile, EmulatorStatus,
@@ -109,14 +107,28 @@ pub(crate) async fn install_emulator_internal(
     let install_root = state.data_dir.join("Emulators");
     let install_dir = install_root.join(&profile.platform);
     let staging_dir = install_root.join(format!(".installing-{}", profile.platform));
-    reset_staging_dir(&install_root, &staging_dir)?;
-    extract_archive(&archive_path, &staging_dir)?;
-    let staged_exe = resolve_profile_executable(&staging_dir, &profile)?;
+    archive::reset_staging_dir(&install_root, &staging_dir)?;
+    {
+        // Archive extraction is synchronous and CPU/IO heavy; keep it off the
+        // async runtime worker so concurrent commands stay responsive.
+        let archive_path = archive_path.clone();
+        let staging_dir = staging_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            archive::extract_archive_safely(&archive_path, &staging_dir)
+        })
+        .await
+        .map_err(|error| format!("Emulator extraction task failed: {error}"))??;
+    }
+    let staged_exe = archive::resolve_executable(
+        &staging_dir,
+        &profile.exe_relative_path,
+        &profile.display_name,
+    )?;
     let relative_exe = staged_exe
         .strip_prefix(&staging_dir)
         .map_err(|_| "Installed emulator executable escaped the staging folder.".to_string())?
         .to_path_buf();
-    replace_install_dir(&install_root, &install_dir, &staging_dir)?;
+    archive::replace_directory(&install_root, &install_dir, &staging_dir)?;
     let exe_path = install_dir.join(relative_exe);
     persist_emulator(state, &profile, &resolved.version, &exe_path)?;
     let _ = fs::remove_file(archive_path);
@@ -306,13 +318,6 @@ fn existing_emulator(
     let version = store
         .get_profile_emulator_config(&profile.id)?
         .and_then(|config| config.version)
-        .or_else(|| {
-            store
-                .get_emulator_config(&profile.platform)
-                .ok()
-                .flatten()
-                .and_then(|config| config.version)
-        })
         .unwrap_or_else(|| "installed".to_string());
     Ok(path.map(|path| (path.to_string_lossy().to_string(), version)))
 }
@@ -370,134 +375,31 @@ async fn download_emulator_archive(
         .await
         .map_err(|error| format!("Failed to create emulator temp folder: {error}"))?;
     let archive_path = temp_dir.join(crate::downloads::safe_segment(&asset.filename));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|error| format!("Failed to initialize emulator downloader: {error}"))?;
-    let bytes = client
-        .get(&asset.url)
-        .header("User-Agent", "RetroHydra/0.1")
-        .send()
-        .await
-        .map_err(|error| format!("Failed to download {}: {error}", profile.display_name))?
-        .error_for_status()
-        .map_err(|error| format!("Emulator download returned an error: {error}"))?
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read emulator download: {error}"))?;
-    if bytes.len() as u64 > MAX_EMULATOR_ARCHIVE_BYTES {
-        return Err("emulator_archive_too_large: Download exceeded the size limit.".into());
-    }
-    if let VersionStrategy::Fixed { sha256, .. } = &profile.version_strategy {
-        let actual = hex::encode(Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(sha256) {
-            return Err(format!(
-                "emulator_checksum_mismatch: expected {sha256}, got {actual}"
-            ));
-        }
-    }
-    tokio::fs::write(&archive_path, bytes)
-        .await
-        .map_err(|error| format!("Failed to save emulator archive: {error}"))?;
-    Ok(archive_path)
-}
 
-fn extract_archive(archive_path: &Path, install_dir: &Path) -> Result<(), String> {
-    let extension = archive_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "zip" => extract_zip_safely(archive_path, install_dir),
-        "7z" => extract_7z_safely(archive_path, install_dir),
-        _ => Err(format!("unsupported_emulator_archive:{extension}")),
-    }
-}
-
-fn extract_7z_safely(archive_path: &Path, install_dir: &Path) -> Result<(), String> {
-    let install_dir = install_dir.to_path_buf();
-    let callback_install_dir = install_dir.clone();
-    sevenz_rust::decompress_file_with_extract_fn(
-        archive_path,
-        &install_dir,
-        move |entry, reader, _| {
-            let relative = safe_relative_path(entry.name()).map_err(sevenz_rust::Error::other)?;
-            let output_path = callback_install_dir.join(relative);
-            if entry.is_directory() {
-                fs::create_dir_all(&output_path).map_err(sevenz_rust::Error::io)?;
-                return Ok(true);
-            }
-            if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).map_err(sevenz_rust::Error::io)?;
-            }
-            let mut output = File::create(&output_path).map_err(sevenz_rust::Error::io)?;
-            io::copy(reader, &mut output).map_err(sevenz_rust::Error::io)?;
-            Ok(true)
-        },
-    )
-    .map_err(|error| format!("Failed to extract 7z emulator archive: {error}"))
-}
-
-fn extract_zip_safely(archive_path: &Path, install_dir: &Path) -> Result<(), String> {
-    let file = File::open(archive_path)
-        .map_err(|error| format!("Failed to open emulator zip archive: {error}"))?;
-    let mut archive = ZipArchive::new(file)
-        .map_err(|error| format!("Failed to read emulator zip archive: {error}"))?;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| format!("Failed to read zip entry: {error}"))?;
-        let relative = safe_relative_path(entry.name())?;
-        let output_path = install_dir.join(relative);
-        if entry.is_dir() {
-            fs::create_dir_all(&output_path)
-                .map_err(|error| format!("Failed to create emulator folder: {error}"))?;
-            continue;
-        }
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Failed to create emulator folder: {error}"))?;
-        }
-        let mut output = File::create(&output_path)
-            .map_err(|error| format!("Failed to create emulator file: {error}"))?;
-        io::copy(&mut entry, &mut output)
-            .map_err(|error| format!("Failed to extract emulator file: {error}"))?;
-    }
-    Ok(())
-}
-
-fn resolve_profile_executable(
-    install_dir: &Path,
-    profile: &EmulatorProfile,
-) -> Result<PathBuf, String> {
-    let relative = safe_relative_path(&profile.exe_relative_path)?;
-    let direct = install_dir.join(relative);
-    let executable = if direct.is_file() {
-        direct
-    } else {
-        find_file_by_name(
-            install_dir,
-            Path::new(&profile.exe_relative_path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&profile.exe_relative_path),
-        )
-        .ok_or_else(|| {
-            format!(
-                "{} was not found after installing {}.",
-                profile.exe_relative_path, profile.display_name
-            )
-        })?
+    // Pinned (Fixed) profiles verify against a known hash; GithubLatest assets
+    // have no pinned hash, but we still verify the GitHub-reported size and cap
+    // the transfer so a hostile redirect can't stream an unbounded archive.
+    let expected_sha256 = match &profile.version_strategy {
+        VersionStrategy::Fixed { sha256, .. } => Some(sha256.as_str()),
+        VersionStrategy::GithubLatest { .. } => None,
     };
-    let canonical_root = fs::canonicalize(install_dir)
-        .map_err(|error| format!("Failed to inspect emulator install folder: {error}"))?;
-    let canonical_executable = fs::canonicalize(&executable)
-        .map_err(|error| format!("Failed to inspect emulator executable: {error}"))?;
-    if !canonical_executable.starts_with(canonical_root) {
-        return Err("Installed emulator executable escaped the install folder.".into());
-    }
-    Ok(executable)
+    let expected_size_bytes = (asset.size > 0).then_some(asset.size);
+
+    crate::downloads::download_http_streaming(
+        &asset.url,
+        &archive_path,
+        crate::downloads::StreamOptions {
+            expected_sha256,
+            expected_size_bytes,
+            max_bytes: Some(MAX_EMULATOR_ARCHIVE_BYTES),
+            resume: true,
+        },
+        |_, _| {},
+    )
+    .await
+    .map_err(|error| format!("Failed to download {}: {error}", profile.display_name))?;
+
+    Ok(archive_path)
 }
 
 fn persist_emulator(
@@ -509,13 +411,6 @@ fn persist_emulator(
     let exe = exe_path.to_string_lossy().to_string();
     let launch_args = profile.launch_args_template();
     let store = lock_store(state)?;
-    store.upsert_emulator_config(
-        &profile.platform,
-        Some(&exe),
-        "valid",
-        Some(version),
-        Some(&launch_args),
-    )?;
     store.upsert_profile_emulator_config(
         &profile.id,
         &profile.platform,
@@ -525,83 +420,6 @@ fn persist_emulator(
         Some(&launch_args),
     )?;
     Ok(())
-}
-
-fn reset_staging_dir(install_root: &Path, staging_dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(install_root)
-        .map_err(|error| format!("Failed to create emulator install folder: {error}"))?;
-    remove_dir_inside(install_root, staging_dir)?;
-    fs::create_dir_all(staging_dir)
-        .map_err(|error| format!("Failed to create emulator staging folder: {error}"))
-}
-
-fn replace_install_dir(
-    install_root: &Path,
-    install_dir: &Path,
-    staging_dir: &Path,
-) -> Result<(), String> {
-    remove_dir_inside(install_root, install_dir)?;
-    fs::rename(staging_dir, install_dir)
-        .map_err(|error| format!("Failed to finalize emulator install: {error}"))
-}
-
-fn remove_dir_inside(root: &Path, target: &Path) -> Result<(), String> {
-    if !target.exists() {
-        return Ok(());
-    }
-    let root = fs::canonicalize(root)
-        .map_err(|error| format!("Failed to inspect emulator root: {error}"))?;
-    let target = fs::canonicalize(target)
-        .map_err(|error| format!("Failed to inspect emulator folder: {error}"))?;
-    if target == root || !target.starts_with(&root) {
-        return Err(format!(
-            "Refusing to remove emulator folder outside app data: {}",
-            target.display()
-        ));
-    }
-    fs::remove_dir_all(target)
-        .map_err(|error| format!("Failed to replace emulator install folder: {error}"))
-}
-
-fn safe_relative_path(input: &str) -> Result<PathBuf, String> {
-    let path = Path::new(input.trim());
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err("Emulator archive contains an unsafe path.".to_string());
-    }
-    let mut safe = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(segment) => safe.push(segment),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err("Emulator archive contains a path traversal entry.".to_string())
-            }
-        }
-    }
-    if safe.as_os_str().is_empty() {
-        Err("Emulator archive contains an empty path.".to_string())
-    } else {
-        Ok(safe)
-    }
-}
-
-fn find_file_by_name(root: &Path, file_name: &str) -> Option<PathBuf> {
-    for entry in fs::read_dir(root).ok()?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_file_by_name(&path, file_name) {
-                return Some(found);
-            }
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.eq_ignore_ascii_case(file_name))
-            .unwrap_or(false)
-        {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn file_name_from_url(url: &str) -> Option<String> {
@@ -637,45 +455,4 @@ fn lock_store(state: &AppState) -> Result<std::sync::MutexGuard<'_, RepositorySt
         .store
         .lock()
         .map_err(|_| "Repository store lock is poisoned.".to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use tempfile::tempdir;
-    use zip::write::SimpleFileOptions;
-    use zip::ZipWriter;
-
-    use super::*;
-
-    #[test]
-    fn zip_extraction_rejects_path_traversal() {
-        let temp = tempdir().unwrap();
-        let archive_path = temp.path().join("bad.zip");
-        let file = File::create(&archive_path).unwrap();
-        let mut writer = ZipWriter::new(file);
-        writer
-            .start_file("../outside.exe", SimpleFileOptions::default())
-            .unwrap();
-        writer.write_all(b"bad").unwrap();
-        writer.finish().unwrap();
-
-        let error = extract_zip_safely(&archive_path, temp.path()).unwrap_err();
-
-        assert!(error.contains("path traversal"));
-    }
-
-    #[test]
-    fn executable_can_be_found_in_nested_archive_folder() {
-        let temp = tempdir().unwrap();
-        let nested = temp.path().join("Mesen");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("Mesen.exe"), b"exe").unwrap();
-        let profile = load_emulator_profile("nes").unwrap().unwrap();
-
-        let executable = resolve_profile_executable(temp.path(), &profile).unwrap();
-
-        assert!(executable.ends_with("Mesen.exe"));
-    }
 }

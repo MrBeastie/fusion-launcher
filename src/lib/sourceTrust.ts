@@ -1,21 +1,20 @@
 import type { RepositoryPreview, RepositorySummary, RepositoryTrustLevel } from '@/types/repository';
+import { DEFAULT_LOCALE, getUiText, type Locale } from './i18n.ts';
 
 type SourceTrustTarget = Pick<RepositoryPreview, 'name' | 'url' | 'catalogCount' | 'systemFileCount'>;
 
-export function sourceTrustLabel(trustLevel: RepositoryTrustLevel | string) {
-  if (trustLevel === 'official') return 'Official source';
-  if (trustLevel === 'community') return 'Community source';
-  return 'User source';
+export function sourceTrustLabel(trustLevel: RepositoryTrustLevel | string, locale: Locale = DEFAULT_LOCALE) {
+  const text = getUiText(locale).sourceTrust;
+  if (trustLevel === 'official') return text.official;
+  if (trustLevel === 'community') return text.community;
+  return text.unknown;
 }
 
-export function unknownSourcePrompt(source: SourceTrustTarget | RepositorySummary) {
-  return [
-    'Connect user source?',
-    '',
+export function unknownSourcePrompt(source: SourceTrustTarget | RepositorySummary, locale: Locale = DEFAULT_LOCALE) {
+  return getUiText(locale).sourceTrust.unknownPrompt(
     source.name,
     source.url,
-    `${source.catalogCount} games, ${source.systemFileCount} system files.`,
-    '',
-    'RetroHydra has not verified this source. Connect it only if you trust the maintainer and are allowed to use the referenced files.'
-  ].join('\n');
+    source.catalogCount,
+    source.systemFileCount
+  );
 }

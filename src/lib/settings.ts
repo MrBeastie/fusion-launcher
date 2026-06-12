@@ -2,10 +2,12 @@ import { Store } from '@tauri-apps/plugin-store';
 import { MVP_PLATFORMS, PLATFORMS, type Platform } from '../types/platform.ts';
 import type { EmulatorConfig } from '../types/repository.ts';
 import { api } from './api.ts';
+import { DEFAULT_LOCALE, normalizeLocale, type Locale } from './i18n.ts';
 import { isPreviewRuntime, isTauriRuntime, requireDesktopBridge } from './runtime.ts';
 
 const SETTINGS_FILE = 'settings.json';
 const EMULATORS_KEY = 'emulators';
+const LANGUAGE_KEY = 'language';
 const LEGACY_DEFAULT_EMULATOR_PATH_KEY = 'defaultEmulatorPath';
 const PREVIEW_SETTINGS_KEY = 'retrohydra.preview.settings';
 
@@ -15,11 +17,13 @@ export type EmulatorConfigs = Partial<Record<Platform, EmulatorConfig>>;
 export interface AppSettings {
   emulators: EmulatorPaths;
   emulatorConfigs: EmulatorConfigs;
+  language: Locale;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   emulators: {},
-  emulatorConfigs: {}
+  emulatorConfigs: {},
+  language: DEFAULT_LOCALE
 };
 
 let settingsStore: Promise<Store> | null = null;
@@ -28,7 +32,8 @@ let previewSettings: AppSettings = DEFAULT_SETTINGS;
 function getSettingsStore() {
   settingsStore ??= Store.load(SETTINGS_FILE, {
     defaults: {
-      [EMULATORS_KEY]: DEFAULT_SETTINGS.emulators
+      [EMULATORS_KEY]: DEFAULT_SETTINGS.emulators,
+      [LANGUAGE_KEY]: DEFAULT_SETTINGS.language
     },
     autoSave: true
   });
@@ -39,16 +44,17 @@ function getSettingsStore() {
 export async function loadSettings(): Promise<AppSettings> {
   if (!isTauriRuntime()) {
     if (isPreviewRuntime()) {
+      const previewSettings = loadPreviewSettings();
       const configs = await api.listEmulatorConfigs();
-      if (configs.length > 0) return settingsFromEmulatorConfigs(configs);
-      return loadPreviewSettings();
+      if (configs.length > 0) return settingsFromEmulatorConfigs(configs, previewSettings.language);
+      return previewSettings;
     }
     return requireDesktopBridge('Loading settings');
   }
 
   await migrateLegacyEmulatorSettings();
   const configs = await api.listEmulatorConfigs();
-  return settingsFromEmulatorConfigs(configs);
+  return settingsFromEmulatorConfigs(configs, await loadStoredLanguage());
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
@@ -68,7 +74,10 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
 
         return api.deleteEmulatorConfig(platform);
       }));
-      return savePreviewSettings(settingsFromEmulatorConfigs(await api.listEmulatorConfigs()));
+      return savePreviewSettings(settingsFromEmulatorConfigs(
+        await api.listEmulatorConfigs(),
+        normalizedSettings.language
+      ));
     }
     return requireDesktopBridge('Saving settings');
   }
@@ -86,7 +95,9 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
     return api.deleteEmulatorConfig(platform);
   }));
 
-  return settingsFromEmulatorConfigs(await api.listEmulatorConfigs());
+  await saveStoredLanguage(normalizedSettings.language);
+
+  return settingsFromEmulatorConfigs(await api.listEmulatorConfigs(), normalizedSettings.language);
 }
 
 async function migrateLegacyEmulatorSettings(): Promise<void> {
@@ -116,6 +127,17 @@ async function migrateLegacyEmulatorSettings(): Promise<void> {
 
   await store.delete(EMULATORS_KEY);
   await store.delete(LEGACY_DEFAULT_EMULATOR_PATH_KEY);
+  await store.save();
+}
+
+async function loadStoredLanguage(): Promise<Locale> {
+  const store = await getSettingsStore();
+  return normalizeLocale(await store.get<unknown>(LANGUAGE_KEY));
+}
+
+async function saveStoredLanguage(language: Locale): Promise<void> {
+  const store = await getSettingsStore();
+  await store.set(LANGUAGE_KEY, language);
   await store.save();
 }
 
@@ -150,7 +172,7 @@ export function setEmulatorPath(
   };
 }
 
-function settingsFromEmulatorConfigs(configs: EmulatorConfig[]): AppSettings {
+function settingsFromEmulatorConfigs(configs: EmulatorConfig[], language: Locale = DEFAULT_SETTINGS.language): AppSettings {
   const emulatorConfigs: EmulatorConfigs = {};
   const emulators: EmulatorPaths = {};
 
@@ -162,15 +184,15 @@ function settingsFromEmulatorConfigs(configs: EmulatorConfig[]): AppSettings {
     }
   }
 
-  return { emulators, emulatorConfigs };
+  return { emulators, emulatorConfigs, language };
 }
 
-function normalizeSettings(settings: AppSettings): AppSettings {
+export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   const emulators = normalizeEmulators(settings.emulators);
   const emulatorConfigs: EmulatorConfigs = {};
 
   for (const platform of PLATFORMS) {
-    const config = settings.emulatorConfigs[platform];
+    const config = settings.emulatorConfigs?.[platform];
     if (config) {
       emulatorConfigs[platform] = {
         ...config,
@@ -179,7 +201,11 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     }
   }
 
-  return { emulators, emulatorConfigs };
+  return {
+    emulators,
+    emulatorConfigs,
+    language: normalizeLocale(settings.language)
+  };
 }
 
 function normalizeEmulators(value: unknown): EmulatorPaths {
@@ -208,10 +234,11 @@ function loadPreviewSettings(): AppSettings {
     if (!raw) return previewSettings;
 
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    previewSettings = {
-      emulators: normalizeEmulators(parsed.emulators),
-      emulatorConfigs: normalizeEmulatorConfigs(parsed.emulatorConfigs)
-    };
+    previewSettings = normalizeSettings({
+      emulators: parsed.emulators,
+      emulatorConfigs: normalizeEmulatorConfigs(parsed.emulatorConfigs),
+      language: parsed.language
+    });
   } catch {
     previewSettings = DEFAULT_SETTINGS;
   }

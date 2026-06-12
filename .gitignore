@@ -14,3 +14,9 @@ src-tauri/target/
 coverage/
 .env
 .DS_Store
+outputs/
+.claude/
+CLAUDE.md
+design-qa.md
+.fusion/
+catalog.nova.json

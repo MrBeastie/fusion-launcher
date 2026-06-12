@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { motion } from 'framer-motion';
@@ -8,7 +8,9 @@ import {
   Activity,
   AlertTriangle,
   Ban,
+  Bell,
   CheckCircle2,
+  Download,
   Loader2,
   Pause,
   Play,
@@ -19,6 +21,7 @@ import {
   ShieldAlert,
   X
 } from 'lucide-react';
+import { I18nProvider, useI18n } from '@/components/I18nProvider';
 import { GameDetailsModal } from '@/components/GameDetailsModal';
 import { LaunchErrorModal } from '@/components/LaunchErrorModal';
 import { SettingsModal } from '@/components/SettingsModal';
@@ -26,9 +29,11 @@ import { AppShell } from '@/components/shell/AppShell';
 import {
   collectionTargetForId,
   CollectionsPanel,
-  HeroPanel,
   type CollectionTarget,
-  type HomeRail
+  HeroPanel,
+  HomeRailsPanel,
+  type HomeRail,
+  mergeRailItems
 } from '@/components/shell/CockpitPanels';
 import { GameArt, GamePoster } from '@/components/shell/GamePoster';
 import { useGamepad } from '@/hooks/useGamepad';
@@ -42,6 +47,7 @@ import {
 } from '@/lib/libraryStatus';
 import { api } from '@/lib/api';
 import { isDirectGameDownload } from '@/lib/downloadActions';
+import { getUiText, updateErrorText, type UiText } from '@/lib/i18n';
 import { normalizeLaunchFailure } from '@/lib/launchErrors';
 import { isTauriRuntime } from '@/lib/runtime';
 import { loadSettings, saveSettings, type AppSettings } from '@/lib/settings';
@@ -70,6 +76,7 @@ interface UpdatePanelState {
 }
 
 interface DashboardProps {
+  initialSettings: AppSettings;
   catalog: CatalogGame[];
   repositories: RepositorySummary[];
   message: string | null;
@@ -77,24 +84,14 @@ interface DashboardProps {
   onRefresh: () => Promise<void>;
 }
 
-const FILTERS: Array<{ id: LibraryFilter; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'installed', label: 'Installed' },
-  { id: 'downloading', label: 'Downloading' },
-  { id: 'missing', label: 'Missing Requirements' }
-];
-
-const SORTS: Array<{ id: LibrarySort; label: string }> = [
-  { id: 'title', label: 'Title' },
-  { id: 'status', label: 'Status' },
-  { id: 'platform', label: 'Platform' },
-  { id: 'repository', label: 'Source' }
-];
+const FILTERS: LibraryFilter[] = ['all', 'installed', 'downloading', 'missing'];
+const SORTS: LibrarySort[] = ['title', 'status', 'platform', 'repository'];
 
 const ACTIVE_DOWNLOAD_STATUSES: TorrentDownloadStatus[] = ['resolving', 'downloading', 'cancelling'];
 const RESUMABLE_DOWNLOAD_STATUSES: TorrentDownloadStatus[] = ['paused', 'interrupted', 'error'];
 
 export function Dashboard({
+  initialSettings,
   catalog,
   repositories,
   message,
@@ -130,13 +127,22 @@ export function Dashboard({
   const [sourceUrl, setSourceUrl] = useState('');
   const [sourcePreview, setSourcePreview] = useState<RepositoryPreview | null>(null);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [dataReady, setDataReady] = useState(false);
   const [launchFailure, setLaunchFailure] = useState<LaunchFailure | null>(null);
   const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [seenNotificationKey, setSeenNotificationKey] = useState('');
   const [updatePanel, setUpdatePanel] = useState<UpdatePanelState>({
     phase: 'idle',
     report: null,
     error: null
   });
+  const locale = settings.language;
+  const t = getUiText(locale);
+
+  useEffect(() => {
+    setSettings(initialSettings);
+  }, [initialSettings, setSettings]);
 
   useEffect(() => {
     setCatalog(catalog);
@@ -154,6 +160,8 @@ export function Dashboard({
       setLauncherMessage(null);
     } catch (error) {
       setLauncherMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDataReady(true);
     }
   }, [setDownloads, setLibraryStatuses]);
 
@@ -167,7 +175,7 @@ export function Dashboard({
           setSettingsMessage(null);
         }
       } catch (error) {
-        if (!cancelled) setSettingsMessage(`Failed to load settings: ${error}`);
+        if (!cancelled) setSettingsMessage(t.dashboard.messages.settingsLoadError(error));
       }
     };
 
@@ -175,7 +183,11 @@ export function Dashboard({
     return () => {
       cancelled = true;
     };
-  }, [setSettings]);
+  }, [setSettings, t]);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   useEffect(() => {
     void refreshLauncherData();
@@ -200,23 +212,28 @@ export function Dashboard({
     [libraryStatuses, settings, storeCatalog]
   );
   const itemsByGameId = useMemo(() => new Map(items.map((item) => [item.game.id, item])), [items]);
-  const readyItems = useMemo(() => items.filter((item) => item.readyToPlay), [items]);
-  const installedItems = useMemo(() => items.filter((item) => item.installed), [items]);
   const activeDownloadItems = useMemo(
     () => items.filter((item) => item.isDownloading || item.isPaused || item.hasError),
     [items]
   );
-  const needsSetupItems = useMemo(
-    () => items.filter((item) => item.installed && item.missingRequirements.length > 0),
-    [items]
-  );
-  const recentItems = useMemo(() => items.slice(0, 14), [items]);
-  const heroItem = readyItems[0] ?? installedItems[0] ?? activeDownloadItems[0] ?? items[0] ?? null;
   const selectedGame = selectedGameId ? storeCatalog.find((game) => game.id === selectedGameId) ?? null : null;
   const visibleLibraryItems = useMemo(
     () => searchAndSortLibraryItems(items, libraryFilter, librarySearch, librarySort),
     [items, libraryFilter, librarySearch, librarySort]
   );
+  const homeRails = useMemo(() => composeHomeRails(items, t), [items, t]);
+  const notificationAlertKey = useMemo(() => {
+    const updateKey = updatePanel.phase === 'available'
+      ? `update:${updatePanel.report?.version ?? 'available'}`
+      : '';
+    const eventKey = activityEvents[0]?.id ? `event:${activityEvents[0].id}` : '';
+    return [updateKey, eventKey].filter(Boolean).join('|');
+  }, [activityEvents, updatePanel.phase, updatePanel.report?.version]);
+  const hasNotificationAlert = Boolean(notificationAlertKey && notificationAlertKey !== seenNotificationKey);
+
+  useEffect(() => {
+    if (notificationsOpen) setSeenNotificationKey(notificationAlertKey);
+  }, [notificationAlertKey, notificationsOpen]);
 
   const persistSettings = async (nextSettings: AppSettings) => {
     const savedSettings = await saveSettings(nextSettings);
@@ -265,7 +282,7 @@ export function Dashboard({
   const previewRepositoryUrl = async () => {
     const trimmedUrl = sourceUrl.trim();
     if (!trimmedUrl) {
-      setLauncherMessage('Repository URL is required.');
+      setLauncherMessage(t.dashboard.messages.sourceUrlRequired);
       return;
     }
 
@@ -273,7 +290,7 @@ export function Dashboard({
       const preview = await api.previewRepository(trimmedUrl);
       setSourcePreview(preview);
       addActivityEvent({
-        title: 'Source previewed',
+        title: t.dashboard.messages.sourceChecked,
         detail: preview.name,
         tone: preview.hasExecutableAssets ? 'warning' : 'info'
       });
@@ -283,7 +300,7 @@ export function Dashboard({
   const connectRepositoryUrl = async () => {
     const trimmedUrl = sourceUrl.trim();
     if (!trimmedUrl) {
-      setLauncherMessage('Repository URL is required.');
+      setLauncherMessage(t.dashboard.messages.sourceUrlRequired);
       return;
     }
 
@@ -292,14 +309,14 @@ export function Dashboard({
         ? sourcePreview
         : await api.previewRepository(trimmedUrl);
       if (preview.trustLevel === 'unknown') {
-        const confirmed = window.confirm(unknownSourcePrompt(preview));
+        const confirmed = window.confirm(unknownSourcePrompt(preview, locale));
         if (!confirmed) return;
       }
       await api.connectRepository(trimmedUrl);
       setSourceUrl('');
       setSourcePreview(null);
       addActivityEvent({
-        title: 'Source connected',
+        title: t.dashboard.messages.sourceConnected,
         detail: preview.name,
         tone: preview.hasExecutableAssets ? 'warning' : 'success'
       });
@@ -309,20 +326,20 @@ export function Dashboard({
 
   const connectRepositoryFile = async () => {
     if (!isTauriRuntime()) {
-      setLauncherMessage('Local JSON import is available in the desktop build.');
+      setLauncherMessage(t.dashboard.messages.localJsonDesktopOnly);
       return;
     }
     await runAction('repo-file', async () => {
       const selected = await open({
-        title: 'Select RetroHydra repository JSON',
+        title: t.dashboard.messages.selectSourceJson,
         multiple: false,
         directory: false,
-        filters: [{ name: 'Repository JSON', extensions: ['json'] }]
+        filters: [{ name: t.dashboard.messages.repositoryJson, extensions: ['json'] }]
       });
       if (typeof selected !== 'string') return;
       const preview = await api.previewRepositoryFile(selected);
       if (preview.trustLevel === 'unknown') {
-        const confirmed = window.confirm(unknownSourcePrompt(preview));
+        const confirmed = window.confirm(unknownSourcePrompt(preview, locale));
         if (!confirmed) return;
       }
       await api.connectRepositoryFile(selected);
@@ -342,7 +359,7 @@ export function Dashboard({
       await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
       setHealthReport(bundle.health);
       addActivityEvent({
-        title: 'Diagnostics copied',
+        title: t.dashboard.messages.diagnosticsCopied,
         detail: bundle.logPath,
         tone: 'success'
       });
@@ -396,13 +413,13 @@ export function Dashboard({
       const result = await api.installGame(item.game.id);
       setSettings(await loadSettings());
       addActivityEvent({
-        title: result.status === 'ready' ? 'Installation complete' : 'Installation needs attention',
+        title: result.status === 'ready' ? t.dashboard.messages.installComplete : t.dashboard.messages.installNeedsAttention,
         detail: item.game.title,
         gameId: item.game.id,
         tone: result.status === 'ready' ? 'success' : 'warning'
       });
       if (result.status !== 'ready') {
-        setLauncherMessage(result.message ?? result.errorCode ?? 'Installation needs attention.');
+        setLauncherMessage(result.message ?? result.errorCode ?? t.dashboard.messages.installNeedsAttentionDetail);
         setSelectedGameId(item.game.id);
       }
       await refreshLauncherData();
@@ -421,7 +438,7 @@ export function Dashboard({
     try {
       await api.launchGame(item.game.id);
       addActivityEvent({
-        title: 'Launch requested',
+        title: t.dashboard.messages.launchSent,
         detail: item.game.title,
         gameId: item.game.id,
         tone: 'success'
@@ -466,7 +483,19 @@ export function Dashboard({
     }
     if (kind === 'top') {
       if (value === 'refresh') void refreshAll();
-      if (value === 'settings') setSettingsOpen(true);
+      if (value === 'notifications') setNotificationsOpen((open) => !open);
+      if (value === 'update-check') {
+        setNotificationsOpen(true);
+        void checkAppUpdate();
+      }
+      if (value === 'update-install') {
+        setNotificationsOpen(true);
+        void installAppUpdate();
+      }
+      if (value === 'settings') {
+        setNotificationsOpen(false);
+        setSettingsOpen(true);
+      }
       return;
     }
     if (kind === 'filter') {
@@ -510,6 +539,7 @@ export function Dashboard({
       return;
     }
     if (focusId === 'settings:open') {
+      setNotificationsOpen(false);
       setSettingsOpen(true);
       return;
     }
@@ -523,7 +553,7 @@ export function Dashboard({
     }
     if (focusId === 'downloads:open') setActiveView('downloads');
     if (focusId === 'library:open') setActiveView('library');
-  }, [executePrimaryAction, itemsByGameId, launchItem, openLibraryCollection, refreshAll, runAction, setActiveView, setSelectedGameId]);
+  }, [checkAppUpdate, executePrimaryAction, installAppUpdate, itemsByGameId, launchItem, openLibraryCollection, refreshAll, runAction, setActiveView, setSelectedGameId]);
 
   useEffect(() => {
     document.querySelectorAll<HTMLElement>('[data-focus-active="true"]').forEach((element) => {
@@ -534,14 +564,15 @@ export function Dashboard({
     document
       .querySelector<HTMLElement>(`[data-focus-id="${cssEscape(focusedItemId)}"]`)
       ?.setAttribute('data-focus-active', 'true');
-  }, [activeView, downloads.length, focusedItemId, items.length, selectedGameId, settingsOpen]);
+  }, [activeView, downloads.length, focusedItemId, items.length, notificationsOpen, selectedGameId, settingsOpen]);
 
   useGamepad({
     focusedItemId,
     setFocusedItemId,
     onActivate: focusActivate,
     onBack: () => {
-      if (selectedGameId) setSelectedGameId(null);
+      if (notificationsOpen) setNotificationsOpen(false);
+      else if (selectedGameId) setSelectedGameId(null);
       else if (settingsOpen) setSettingsOpen(false);
       else setActiveView('home');
     },
@@ -554,158 +585,174 @@ export function Dashboard({
   const bannerMessage = message || settingsMessage || launcherMessage;
 
   return (
-    <AppShell
-      activeView={activeView}
-      repositoriesCount={storeRepositories.length}
-      activeDownloadsCount={activeDownloadItems.length}
-      onNavigate={setActiveView}
-      onFocus={setFocusedItemId}
-    >
-      <TopChrome
-        onRefresh={refreshAll}
-        onOpenSettings={() => setSettingsOpen(true)}
+    <I18nProvider locale={locale}>
+      <AppShell
+        activeView={activeView}
+        repositoriesCount={storeRepositories.length}
+        activeDownloadsCount={activeDownloadItems.length}
+        onNavigate={setActiveView}
+        onOpenSettings={() => {
+          setNotificationsOpen(false);
+          setSettingsOpen(true);
+        }}
         onFocus={setFocusedItemId}
-        refreshing={busyAction === 'refresh'}
-      />
-      {bannerMessage && <div className="rh-banner">{bannerMessage}</div>}
-
-      {activeView === 'home' && (
-        <HomeScreen
-          heroItem={heroItem}
-          readyItems={readyItems}
-          activeDownloadItems={activeDownloadItems}
-          needsSetupItems={needsSetupItems}
-          recentItems={recentItems}
-          busyAction={busyAction}
-          onPrimaryAction={(item) => void executePrimaryAction(item)}
-          onOpenDetails={(game) => setSelectedGameId(game.id)}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onFocus={setFocusedItemId}
-        />
-      )}
-
-      {activeView === 'library' && (
-        <LibraryScreen
-          items={visibleLibraryItems}
-          allItems={items}
-          totalCount={items.length}
-          filter={libraryFilter}
-          query={librarySearch}
-          sort={librarySort}
-          busyAction={busyAction}
-          onFilterChange={setLibraryFilter}
-          onQueryChange={setLibrarySearch}
-          onSortChange={setLibrarySort}
-          onPrimaryAction={(item) => void executePrimaryAction(item)}
-          onOpenDetails={(game) => setSelectedGameId(game.id)}
-          onFocus={setFocusedItemId}
-        />
-      )}
-
-      {activeView === 'downloads' && (
-        <DownloadsScreen
-          downloads={downloads}
-          itemsByGameId={itemsByGameId}
-          busyAction={busyAction}
-          onOpenDetails={(game) => setSelectedGameId(game.id)}
-          onPause={(gameId) => runAction(`pause:${gameId}`, () => api.pauseDownload(gameId))}
-          onResume={(gameId) => {
-            const item = itemsByGameId.get(gameId);
-            const record = downloads.find((download) => download.gameId === gameId) ?? item?.download;
-            return runAction(`resume:${gameId}`, () => (
-              isDirectGameDownload(item?.game, record)
-                ? api.startGameDownload(gameId)
-                : api.resumeDownload(gameId)
-            ));
-          }}
-          onCancel={(gameId) => runAction(`cancel:${gameId}`, () => api.cancelDownload(gameId))}
-          onPlay={(item) => void launchItem(item)}
-          onFocus={setFocusedItemId}
-        />
-      )}
-
-      {activeView === 'explore' && (
-        <ExploreScreen
-          events={activityEvents}
-          items={items}
-          onOpenEvent={(event) => {
-            if (event.gameId) setSelectedGameId(event.gameId);
-          }}
-          onFocus={setFocusedItemId}
-        />
-      )}
-
-      {activeView === 'collections' && (
-        <CollectionsScreen
-          items={items}
-          onOpenCollection={openLibraryCollection}
-          onFocus={setFocusedItemId}
-        />
-      )}
-
-      {selectedGame && (
-        <GameDetailsModal
-          game={selectedGame}
-          settings={settings}
+      >
+        <TopChrome
+          onRefresh={refreshAll}
           onOpenSettings={() => {
-            setSelectedGameId(null);
+            setNotificationsOpen(false);
             setSettingsOpen(true);
           }}
-          onClose={() => setSelectedGameId(null)}
-          onRefresh={async () => {
-            await refreshLauncherData();
-            setSettings(await loadSettings());
-            await onRefresh();
-          }}
-        />
-      )}
-
-      {launchFailure && (
-        <LaunchErrorModal
-          failure={launchFailure}
-          onClose={() => setLaunchFailure(null)}
-          onOpenSettings={() => {
-            setLaunchFailure(null);
-            setSettingsOpen(true);
-          }}
-          onOpenDetails={() => {
-            if (launchFailure.gameId) setSelectedGameId(launchFailure.gameId);
-            setLaunchFailure(null);
-          }}
-          onRetryDownload={() => {
-            const item = launchFailure.gameId ? itemsByGameId.get(launchFailure.gameId) : null;
-            setLaunchFailure(null);
-            if (item) void installItem(item);
-          }}
-        />
-      )}
-
-      {settingsOpen && (
-        <SettingsModal
-          settings={settings}
-          repositories={storeRepositories}
-          downloads={downloads}
-          busyAction={busyAction}
-          healthReport={healthReport}
+          onFocus={setFocusedItemId}
+          refreshing={busyAction === 'refresh'}
+          notificationsOpen={notificationsOpen}
+          hasNotificationAlert={hasNotificationAlert}
           updatePanel={updatePanel}
-          sourceUrl={sourceUrl}
-          sourcePreview={sourcePreview}
-          onClose={() => setSettingsOpen(false)}
-          onSave={persistSettings}
-          onSourceUrlChange={updateSourceUrl}
-          onPreviewRepositoryUrl={previewRepositoryUrl}
-          onConnectRepositoryUrl={connectRepositoryUrl}
-          onConnectRepositoryFile={connectRepositoryFile}
-          onDisconnect={disconnect}
-          onRefreshRepository={refreshRepository}
-          onRunHealth={runHealthCheck}
-          onCopyDiagnostics={copyDiagnostics}
-          onOpenLogs={openLogs}
+          activityEvents={activityEvents}
+          onNotificationsOpenChange={setNotificationsOpen}
           onCheckAppUpdate={checkAppUpdate}
           onInstallAppUpdate={installAppUpdate}
         />
-      )}
-    </AppShell>
+        {bannerMessage && <div className="rh-banner">{bannerMessage}</div>}
+
+        {activeView === 'home' && (
+          <HomeScreen
+            loading={!dataReady}
+            heroItem={homeRails.heroItem}
+            rails={homeRails.rails}
+            collectionItems={items}
+            busyAction={busyAction}
+            onPrimaryAction={(item) => void executePrimaryAction(item)}
+            onOpenDetails={(game) => setSelectedGameId(game.id)}
+            onOpenCollection={openLibraryCollection}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onFocus={setFocusedItemId}
+          />
+        )}
+
+        {activeView === 'library' && (
+          <LibraryScreen
+            items={visibleLibraryItems}
+            allItems={items}
+            totalCount={items.length}
+            filter={libraryFilter}
+            query={librarySearch}
+            sort={librarySort}
+            busyAction={busyAction}
+            onFilterChange={setLibraryFilter}
+            onQueryChange={setLibrarySearch}
+            onSortChange={setLibrarySort}
+            onPrimaryAction={(item) => void executePrimaryAction(item)}
+            onOpenDetails={(game) => setSelectedGameId(game.id)}
+            onFocus={setFocusedItemId}
+          />
+        )}
+
+        {activeView === 'downloads' && (
+          <DownloadsScreen
+            downloads={downloads}
+            itemsByGameId={itemsByGameId}
+            busyAction={busyAction}
+            onOpenDetails={(game) => setSelectedGameId(game.id)}
+            onPause={(gameId) => runAction(`pause:${gameId}`, () => api.pauseDownload(gameId))}
+            onResume={(gameId) => {
+              const item = itemsByGameId.get(gameId);
+              const record = downloads.find((download) => download.gameId === gameId) ?? item?.download;
+              return runAction(`resume:${gameId}`, () => (
+                isDirectGameDownload(item?.game, record)
+                  ? api.startGameDownload(gameId)
+                  : api.resumeDownload(gameId)
+              ));
+            }}
+            onCancel={(gameId) => runAction(`cancel:${gameId}`, () => api.cancelDownload(gameId))}
+            onPlay={(item) => void launchItem(item)}
+            onFocus={setFocusedItemId}
+          />
+        )}
+
+        {activeView === 'explore' && (
+          <ExploreScreen
+            events={activityEvents}
+            items={items}
+            onOpenEvent={(event) => {
+              if (event.gameId) setSelectedGameId(event.gameId);
+            }}
+            onFocus={setFocusedItemId}
+          />
+        )}
+
+        {activeView === 'collections' && (
+          <CollectionsScreen
+            items={items}
+            onOpenCollection={openLibraryCollection}
+            onFocus={setFocusedItemId}
+          />
+        )}
+
+        {selectedGame && (
+          <GameDetailsModal
+            game={selectedGame}
+            settings={settings}
+            onOpenSettings={() => {
+              setSelectedGameId(null);
+              setSettingsOpen(true);
+            }}
+            onClose={() => setSelectedGameId(null)}
+            onRefresh={async () => {
+              await refreshLauncherData();
+              setSettings(await loadSettings());
+              await onRefresh();
+            }}
+          />
+        )}
+
+        {launchFailure && (
+          <LaunchErrorModal
+            failure={launchFailure}
+            onClose={() => setLaunchFailure(null)}
+            onOpenSettings={() => {
+              setLaunchFailure(null);
+              setSettingsOpen(true);
+            }}
+            onOpenDetails={() => {
+              if (launchFailure.gameId) setSelectedGameId(launchFailure.gameId);
+              setLaunchFailure(null);
+            }}
+            onRetryDownload={() => {
+              const item = launchFailure.gameId ? itemsByGameId.get(launchFailure.gameId) : null;
+              setLaunchFailure(null);
+              if (item) void installItem(item);
+            }}
+          />
+        )}
+
+        {settingsOpen && (
+          <SettingsModal
+            settings={settings}
+            repositories={storeRepositories}
+            downloads={downloads}
+            busyAction={busyAction}
+            healthReport={healthReport}
+            updatePanel={updatePanel}
+            sourceUrl={sourceUrl}
+            sourcePreview={sourcePreview}
+            onClose={() => setSettingsOpen(false)}
+            onSave={persistSettings}
+            onSourceUrlChange={updateSourceUrl}
+            onPreviewRepositoryUrl={previewRepositoryUrl}
+            onConnectRepositoryUrl={connectRepositoryUrl}
+            onConnectRepositoryFile={connectRepositoryFile}
+            onDisconnect={disconnect}
+            onRefreshRepository={refreshRepository}
+            onRunHealth={runHealthCheck}
+            onCopyDiagnostics={copyDiagnostics}
+            onOpenLogs={openLogs}
+            onCheckAppUpdate={checkAppUpdate}
+            onInstallAppUpdate={installAppUpdate}
+          />
+        )}
+      </AppShell>
+    </I18nProvider>
   );
 }
 
@@ -713,24 +760,78 @@ function TopChrome({
   onRefresh,
   onOpenSettings,
   onFocus,
-  refreshing
+  refreshing,
+  notificationsOpen,
+  hasNotificationAlert,
+  updatePanel,
+  activityEvents,
+  onNotificationsOpenChange,
+  onCheckAppUpdate,
+  onInstallAppUpdate
 }: {
   onRefresh: () => void;
   onOpenSettings: () => void;
   onFocus: (focusId: string) => void;
   refreshing: boolean;
+  notificationsOpen: boolean;
+  hasNotificationAlert: boolean;
+  updatePanel: UpdatePanelState;
+  activityEvents: ActivityEvent[];
+  onNotificationsOpenChange: (open: boolean) => void;
+  onCheckAppUpdate: () => Promise<void>;
+  onInstallAppUpdate: () => Promise<void>;
 }) {
   const [now, setNow] = useState(() => new Date());
+  const [searchValue, setSearchValue] = useState('');
+  const actionsRef = useRef<HTMLDivElement>(null);
+  const updateCheckedFromPopoverRef = useRef(false);
+  const { locale, t } = useI18n();
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!notificationsOpen || updatePanel.phase !== 'idle' || updateCheckedFromPopoverRef.current) return;
+    updateCheckedFromPopoverRef.current = true;
+    void onCheckAppUpdate();
+  }, [notificationsOpen, onCheckAppUpdate, updatePanel.phase]);
+
+  useEffect(() => {
+    if (!notificationsOpen) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (!actionsRef.current?.contains(event.target)) onNotificationsOpenChange(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onNotificationsOpenChange(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [notificationsOpen, onNotificationsOpenChange]);
+
   return (
     <header className="rh-topbar">
-      <div />
-      <div className="flex items-center gap-3">
+      <label className="rh-global-search" aria-label={t.dashboard.topbar.searchAria}>
+        <Search className="h-4 w-4 text-white/42" />
+        <input
+          value={searchValue}
+          onChange={(event) => setSearchValue(event.target.value)}
+          placeholder={t.dashboard.topbar.searchPlaceholder}
+        />
+      </label>
+      <div ref={actionsRef} className="rh-topbar-actions">
         <button
           data-focus-id="top:refresh"
           data-focus-zone="topbar"
@@ -738,10 +839,41 @@ function TopChrome({
           onClick={onRefresh}
           disabled={refreshing}
           className="rh-icon-button rh-focusable"
-          title="Refresh repository"
+          title={t.dashboard.topbar.refreshTitle}
         >
           {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
         </button>
+        <div className="rh-notification-root">
+          <button
+            id="rh-notifications-trigger"
+            data-testid="top-notifications"
+            data-focus-id="top:notifications"
+            data-focus-zone="topbar"
+            onFocus={() => onFocus('top:notifications')}
+            onClick={() => onNotificationsOpenChange(!notificationsOpen)}
+            className="rh-icon-button rh-notification-button rh-focusable"
+            title={t.dashboard.topbar.notificationsTitle}
+            aria-label={t.dashboard.topbar.notificationsTitle}
+            aria-expanded={notificationsOpen}
+            aria-controls="rh-notifications-popover"
+          >
+            <Bell className="h-4 w-4" />
+            {hasNotificationAlert && (
+              <span className="rh-notification-dot">
+                <span className="sr-only">{t.dashboard.topbar.notifications.unread}</span>
+              </span>
+            )}
+          </button>
+          {notificationsOpen && (
+            <TopNotificationsPopover
+              state={updatePanel}
+              events={activityEvents}
+              onFocus={onFocus}
+              onCheck={onCheckAppUpdate}
+              onInstall={onInstallAppUpdate}
+            />
+          )}
+        </div>
         <button
           data-testid="top-settings"
           data-focus-id="top:settings"
@@ -749,46 +881,199 @@ function TopChrome({
           onFocus={() => onFocus('top:settings')}
           onClick={onOpenSettings}
           className="rh-icon-button rh-focusable"
-          title="Open settings"
+          title={t.dashboard.topbar.settingsTitle}
         >
           <Settings className="h-4 w-4" />
         </button>
-        <div className="rh-clock">{formatClock(now)}</div>
+        <div className="rh-clock">{formatClock(now, locale)}</div>
       </div>
     </header>
   );
 }
 
-function HomeScreen({
-  heroItem,
-  readyItems,
-  activeDownloadItems,
-  needsSetupItems,
-  recentItems,
-  busyAction,
-  onPrimaryAction,
-  onOpenDetails,
-  onOpenSettings,
-  onFocus
+function TopNotificationsPopover({
+  state,
+  events,
+  onFocus,
+  onCheck,
+  onInstall
 }: {
+  state: UpdatePanelState;
+  events: ActivityEvent[];
+  onFocus: (focusId: string) => void;
+  onCheck: () => Promise<void>;
+  onInstall: () => Promise<void>;
+}) {
+  const { locale, t } = useI18n();
+  const checking = state.phase === 'checking';
+  const installing = state.phase === 'installing';
+  const busy = checking || installing;
+  const visibleEvents = events.slice(0, 5);
+
+  return (
+    <section
+      id="rh-notifications-popover"
+      className="rh-notifications-popover"
+      aria-labelledby="rh-notifications-title"
+    >
+      <div className="rh-notifications-header">
+        <div>
+          <div id="rh-notifications-title" className="rh-notifications-title">{t.dashboard.topbar.notifications.title}</div>
+          <div className="rh-notifications-subtitle">{t.dashboard.topbar.notifications.subtitle}</div>
+        </div>
+        {state.phase === 'available' && (
+          <span className="rh-notifications-badge">{t.dashboard.topbar.notifications.availableBadge}</span>
+        )}
+      </div>
+
+      <div className={`rh-notification-update rh-notification-update-${state.phase}`}>
+        <div className="rh-notification-update-heading">
+          <UpdateStatusIcon phase={state.phase} />
+          <div className="min-w-0">
+            <div className="rh-notification-section-title">{t.dashboard.topbar.notifications.updateTitle}</div>
+            <div className="rh-notification-status-text">{updateNotificationText(state, t, locale)}</div>
+          </div>
+        </div>
+        <div className="rh-notification-actions">
+          <button
+            type="button"
+            data-focus-id="top:update-check"
+            data-focus-zone="topbar"
+            onFocus={() => onFocus('top:update-check')}
+            onClick={() => void onCheck()}
+            disabled={busy}
+            className="rh-mini-action rh-focusable"
+          >
+            {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCcw className="h-3.5 w-3.5" />}
+            {state.phase === 'error' ? t.settings.updates.retry : t.settings.updates.check}
+          </button>
+          {state.phase === 'available' && (
+            <button
+              type="button"
+              data-focus-id="top:update-install"
+              data-focus-zone="topbar"
+              onFocus={() => onFocus('top:update-install')}
+              onClick={() => void onInstall()}
+              disabled={busy}
+              className="rh-mini-action rh-focusable"
+            >
+              {installing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              {t.settings.updates.installNow}
+            </button>
+          )}
+        </div>
+        {state.phase === 'available' && state.report?.body && (
+          <div className="rh-notification-release">
+            <div className="rh-notification-release-label">{t.dashboard.topbar.notifications.releaseNotes}</div>
+            <div>{state.report.body}</div>
+          </div>
+        )}
+        {state.phase === 'available' && state.report?.date && (
+          <div className="rh-notification-published">{t.common.published} {state.report.date}</div>
+        )}
+      </div>
+
+      <div className="rh-notification-feed-heading">{t.dashboard.topbar.notifications.activityTitle}</div>
+      <div className="rh-notification-feed">
+        {visibleEvents.length === 0 ? (
+          <div className="rh-notification-empty">{t.dashboard.topbar.notifications.empty}</div>
+        ) : visibleEvents.map((event) => (
+          <div key={event.id} className="rh-notification-event">
+            <ActivityIcon tone={event.tone} />
+            <div className="min-w-0 flex-1">
+              <div className="rh-notification-event-title">{displayActivityTitle(event.title, t)}</div>
+              <div className="rh-notification-event-detail">{event.detail}</div>
+            </div>
+            <div className="rh-notification-event-time">{formatEventTime(event.timestamp, locale)}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function UpdateStatusIcon({ phase }: { phase: UpdatePanelPhase }) {
+  const iconClass = 'h-4 w-4';
+  if (phase === 'checking' || phase === 'installing') return <Loader2 className={`${iconClass} animate-spin text-hydra-accent`} />;
+  if (phase === 'available') return <Download className={`${iconClass} text-hydra-green`} />;
+  if (phase === 'error') return <AlertTriangle className={`${iconClass} text-red-200`} />;
+  if (phase === 'up-to-date') return <CheckCircle2 className={`${iconClass} text-hydra-green`} />;
+  return <Bell className={`${iconClass} text-white/58`} />;
+}
+
+function updateNotificationText(state: UpdatePanelState, t: UiText, locale: string) {
+  if (state.phase === 'idle') return t.dashboard.topbar.notifications.updateIdle;
+  if (state.phase === 'checking') return t.settings.updates.checking;
+  if (state.phase === 'installing') return t.settings.updates.installing;
+  if (state.phase === 'up-to-date') return t.settings.updates.upToDate(state.report?.currentVersion);
+  if (state.phase === 'available') return t.settings.updates.available(state.report?.version);
+  return updateErrorText(state.error, locale);
+}
+
+function composeHomeRails(
+  items: GameLibraryItem[],
+  t: UiText
+): { heroItem: GameLibraryItem | null; rails: HomeRail[] } {
+  const ready = items.filter((item) => item.readyToPlay);
+  const downloading = items.filter((item) => item.isDownloading || item.isPaused || item.hasError);
+  const needsSetup = items.filter((item) => item.missingRequirements.length > 0);
+  const heroItem = ready[0] ?? downloading[0] ?? items[0] ?? null;
+
+  const rails: HomeRail[] = [
+    {
+      title: t.dashboard.rails.continuePlaying,
+      testId: 'home-rail-ready',
+      zone: 'ready',
+      items: mergeRailItems(ready, [], 12)
+    },
+    {
+      title: t.dashboard.rails.downloads,
+      testId: 'home-rail-downloads',
+      zone: 'downloads',
+      items: mergeRailItems(downloading, [], 12)
+    },
+    {
+      title: t.dashboard.rails.needsSetup,
+      testId: 'home-rail-setup',
+      zone: 'setup',
+      items: mergeRailItems(needsSetup, [], 12)
+    },
+    {
+      title: t.dashboard.rails.recentlyAdded,
+      testId: 'home-rail-recent',
+      zone: 'recent',
+      items: mergeRailItems(items, [], 12)
+    }
+  ];
+
+  return { heroItem, rails };
+}
+
+interface HomeScreenProps {
+  loading: boolean;
   heroItem: GameLibraryItem | null;
-  readyItems: GameLibraryItem[];
-  activeDownloadItems: GameLibraryItem[];
-  needsSetupItems: GameLibraryItem[];
-  recentItems: GameLibraryItem[];
+  rails: HomeRail[];
+  collectionItems: GameLibraryItem[];
   busyAction: BusyAction;
   onPrimaryAction: (item: GameLibraryItem) => void;
   onOpenDetails: (game: CatalogGame) => void;
+  onOpenCollection: (target: CollectionTarget) => void;
   onOpenSettings: () => void;
   onFocus: (focusId: string) => void;
-}) {
-  const rails = useMemo<HomeRail[]>(() => composeHomeRails({
-    readyItems,
-    activeDownloadItems,
-    needsSetupItems,
-    recentItems
-  }), [activeDownloadItems, needsSetupItems, readyItems, recentItems]);
+}
 
+function HomeScreen({
+  loading,
+  heroItem,
+  rails,
+  collectionItems,
+  busyAction,
+  onPrimaryAction,
+  onOpenDetails,
+  onOpenCollection,
+  onOpenSettings,
+  onFocus
+}: HomeScreenProps) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
@@ -796,69 +1081,83 @@ function HomeScreen({
       className="rh-home-screen"
       data-testid="home-screen"
     >
-      <HeroPanel
-        heroItem={heroItem}
-        rails={rails}
-        busyAction={busyAction}
-        onPrimaryAction={onPrimaryAction}
-        onOpenDetails={onOpenDetails}
-        onOpenSettings={onOpenSettings}
-        onFocus={onFocus}
-      />
+      {loading ? (
+        <HomeSkeleton />
+      ) : (
+        <>
+          <HeroPanel
+            heroItem={heroItem}
+            busyAction={busyAction}
+            onPrimaryAction={onPrimaryAction}
+            onOpenDetails={onOpenDetails}
+            onOpenSettings={onOpenSettings}
+            onFocus={onFocus}
+          />
+          <HomeRailsPanel
+            rails={rails}
+            onPrimaryAction={onPrimaryAction}
+            onOpenDetails={onOpenDetails}
+            onFocus={onFocus}
+          />
+          <CollectionsPanel
+            items={collectionItems}
+            onOpenCollection={onOpenCollection}
+            onFocus={onFocus}
+          />
+        </>
+      )}
     </motion.div>
   );
 }
 
-function composeHomeRails({
-  readyItems,
-  activeDownloadItems,
-  needsSetupItems,
-  recentItems
-}: {
-  readyItems: GameLibraryItem[];
-  activeDownloadItems: GameLibraryItem[];
-  needsSetupItems: GameLibraryItem[];
-  recentItems: GameLibraryItem[];
-}): HomeRail[] {
-  const usedGameIds = new Set<string>();
-  const rails: HomeRail[] = [];
-  const takeUnique = (items: GameLibraryItem[], limit: number) => {
-    const result: GameLibraryItem[] = [];
-    for (const item of items) {
-      if (usedGameIds.has(item.game.id)) continue;
-      usedGameIds.add(item.game.id);
-      result.push(item);
-      if (result.length >= limit) break;
-    }
-    return result;
-  };
+function HomeSkeleton() {
+  return (
+    <div className="rh-home-skeleton" data-testid="home-skeleton" aria-hidden="true">
+      <div className="sk-hero sk-block" />
 
-  const readyRailItems = takeUnique(readyItems, 10);
-  if (readyRailItems.length > 0) {
-    rails.push({ title: 'Ready to Play', testId: 'ready-rail', zone: 'ready', items: readyRailItems });
-  }
+      <div className="sk-toolbar">
+        <div className="sk-chips">
+          <span className="sk-chip sk-chip-active" />
+          {Array.from({ length: 5 }).map((_, index) => (
+            <span key={index} className="sk-chip sk-block" />
+          ))}
+        </div>
+        <div className="sk-view-toggle">
+          <span className="sk-view-btn sk-block" />
+          <span className="sk-view-btn sk-block" />
+        </div>
+      </div>
 
-  const downloadRailItems = takeUnique(activeDownloadItems, 8);
-  if (downloadRailItems.length > 0) {
-    rails.push({ title: 'Downloads', testId: 'downloads-rail', zone: 'home-downloads', items: downloadRailItems });
-  }
+      {[0, 1].map((rail) => (
+        <div key={rail} className="sk-rail">
+          <span className="sk-rail-label sk-block" />
+          <div className="sk-rail-track">
+            {Array.from({ length: 7 }).map((_, index) => (
+              <div key={index} className="sk-card sk-block">
+                <span className="sk-card-label" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
 
-  const setupRailItems = takeUnique(needsSetupItems, 8);
-  if (setupRailItems.length > 0) {
-    rails.push({ title: 'Needs Setup', testId: 'needs-setup-rail', zone: 'needs-setup', items: setupRailItems });
-  }
-
-  const recentRailItems = takeUnique(recentItems, 10);
-  if (recentRailItems.length > 0 || rails.length === 0) {
-    rails.push({
-      title: 'Recently Added',
-      testId: 'recent-rail',
-      zone: 'recent',
-      items: recentRailItems.length > 0 ? recentRailItems : recentItems.slice(0, 10)
-    });
-  }
-
-  return rails;
+      <div className="sk-bottom">
+        <div className="sk-collections">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <span key={index} className="sk-collection-card sk-block" />
+          ))}
+        </div>
+        <div className="sk-filters-panel">
+          <span className="sk-rail-label sk-block" />
+          <div className="sk-filter-grid">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <span key={index} className="sk-filter-chip sk-block" />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function CollectionsScreen({
@@ -888,13 +1187,14 @@ function ExploreScreen({
   onOpenEvent: (event: ActivityEvent) => void;
   onFocus: (focusId: string) => void;
 }) {
+  const { locale, t } = useI18n();
   return (
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="rh-screen rh-panel" data-testid="explore-screen">
-      <ScreenHeader eyebrow="Explore" title="Activity Feed" description="Recent repository, library, and download events" />
+      <ScreenHeader eyebrow={t.dashboard.explore.eyebrow} title={t.dashboard.explore.title} description={t.dashboard.explore.description} />
       <div className="rh-explore-layout">
         <div className="rh-activity-list">
           {events.length === 0 ? (
-            <div className="rh-empty-compact">No activity yet.</div>
+            <div className="rh-empty-compact">{t.dashboard.explore.empty}</div>
           ) : events.slice(0, 12).map((event) => {
             const focusId = `activity:${encodeURIComponent(event.gameId ?? event.id)}`;
             return (
@@ -908,24 +1208,26 @@ function ExploreScreen({
               >
                 <ActivityIcon tone={event.tone} />
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-bold">{event.title}</div>
+                  <div className="truncate text-sm font-bold">{displayActivityTitle(event.title, t)}</div>
                   <div className="truncate text-xs text-white/42">{event.detail}</div>
                 </div>
-                <div className="ml-auto text-[10px] uppercase text-white/34">{formatEventTime(event.timestamp)}</div>
+                <div className="ml-auto text-[10px] uppercase text-white/34">{formatEventTime(event.timestamp, locale)}</div>
               </button>
             );
           })}
         </div>
         <div className="rh-explore-stats">
-          <div className="text-[10px] font-black uppercase tracking-wide text-white/42">Library Stats</div>
-          <StatsLine label="Games" value={String(items.length)} />
-          <StatsLine label="Ready" value={String(items.filter((item) => item.readyToPlay).length)} />
-          <StatsLine label="Downloading" value={String(items.filter((item) => item.isDownloading || item.isPaused || item.hasError).length)} />
+          <div className="text-[10px] font-semibold text-white/42">{t.dashboard.explore.libraryStats}</div>
+          <StatsLine label={t.dashboard.explore.games} value={String(items.length)} />
+          <StatsLine label={t.dashboard.explore.ready} value={String(items.filter((item) => item.readyToPlay).length)} />
+          <StatsLine label={t.dashboard.explore.downloads} value={String(items.filter((item) => item.isDownloading || item.isPaused || item.hasError).length)} />
         </div>
       </div>
     </motion.section>
   );
 }
+
+const LIBRARY_PAGE_SIZE = 60;
 
 function LibraryScreen({
   items,
@@ -956,20 +1258,49 @@ function LibraryScreen({
   onOpenDetails: (game: CatalogGame) => void;
   onFocus: (focusId: string) => void;
 }) {
+  const { t } = useI18n();
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [visibleCount, setVisibleCount] = useState(LIBRARY_PAGE_SIZE);
+
+  // Reset the render window whenever the filtered/sorted/searched set changes.
+  useEffect(() => {
+    setVisibleCount(LIBRARY_PAGE_SIZE);
+  }, [items]);
+
+  // Grow the window as the bottom sentinel scrolls into view, so large catalogs
+  // never mount thousands of cards at once (which froze the initial render).
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || visibleCount >= items.length) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleCount((count) => Math.min(count + LIBRARY_PAGE_SIZE, items.length));
+        }
+      },
+      { root: gridRef.current, rootMargin: '600px' }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [items.length, visibleCount]);
+
+  const renderedItems = items.slice(0, visibleCount);
+
   return (
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="rh-screen rh-panel" data-testid="library-screen">
-      <ScreenHeader eyebrow="Library" title="Installed Games & Catalog" description={`${items.length} visible / ${totalCount} total games`} />
+      <ScreenHeader eyebrow={t.dashboard.library.eyebrow} title={t.dashboard.library.title} description={t.dashboard.library.description(items.length, totalCount)} />
       <div className="rh-library-toolbar">
         <div className="rh-library-search">
           <Search className="h-4 w-4 text-white/42" />
           <input
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="Search library"
+            placeholder={t.dashboard.library.searchPlaceholder}
             data-testid="library-search"
           />
           {query && (
-            <button onClick={() => onQueryChange('')} className="rh-search-clear" title="Clear search">
+            <button onClick={() => onQueryChange('')} className="rh-search-clear" title={t.dashboard.library.clearSearch}>
               <X className="h-3.5 w-3.5" />
             </button>
           )}
@@ -978,47 +1309,54 @@ function LibraryScreen({
           value={sort}
           onChange={(event) => onSortChange(event.target.value as LibrarySort)}
           className="rh-library-sort"
-          aria-label="Library sort"
+          aria-label={t.dashboard.library.sortAria}
           data-testid="library-sort"
         >
           {SORTS.map((item) => (
-            <option key={item.id} value={item.id}>{item.label}</option>
+            <option key={item} value={item}>{t.dashboard.sorts[item]}</option>
           ))}
         </select>
       </div>
       <div className="mb-4 flex flex-wrap gap-2" data-testid="library-filters">
         {FILTERS.map((item) => {
-          const count = filterCountLabel(item.id, totalCount, allItems);
+          const count = filterCountLabel(item, totalCount, allItems);
           return (
             <button
-              key={item.id}
-              data-focus-id={`filter:${item.id}`}
+              key={item}
+              data-focus-id={`filter:${item}`}
               data-focus-zone="library-filters"
-              onFocus={() => onFocus(`filter:${item.id}`)}
-              onClick={() => onFilterChange(item.id)}
-              className={`rh-filter-chip rh-focusable ${filter === item.id ? 'rh-filter-chip-active' : ''}`}
+              onFocus={() => onFocus(`filter:${item}`)}
+              onClick={() => onFilterChange(item)}
+              className={`rh-filter-chip rh-focusable ${filter === item ? 'rh-filter-chip-active' : ''}`}
             >
-              {item.label}
+              {t.dashboard.filters[item]}
               <span>{count}</span>
             </button>
           );
         })}
       </div>
-      <div className="rh-library-grid" data-testid="library-grid">
+      <div ref={gridRef} className="rh-library-grid" data-testid="library-grid">
         {items.length === 0 ? (
-          <div className="rh-empty-compact" data-testid="library-empty">No games match the current library view.</div>
-        ) : items.map((item) => (
-          <GamePoster
-            key={item.game.id}
-            item={item}
-            focusId={`game:library:${encodeURIComponent(item.game.id)}`}
-            zone="library"
-            selected={busyAction?.endsWith(item.game.id)}
-            onOpen={onOpenDetails}
-            onAction={onPrimaryAction}
-            onFocus={onFocus}
-          />
-        ))}
+          <div className="rh-empty-compact" data-testid="library-empty">{t.dashboard.library.empty}</div>
+        ) : (
+          <>
+            {renderedItems.map((item) => (
+              <GamePoster
+                key={item.game.id}
+                item={item}
+                focusId={`game:library:${encodeURIComponent(item.game.id)}`}
+                zone="library"
+                selected={busyAction?.endsWith(item.game.id)}
+                onOpen={onOpenDetails}
+                onAction={onPrimaryAction}
+                onFocus={onFocus}
+              />
+            ))}
+            {visibleCount < items.length && (
+              <div ref={sentinelRef} className="rh-library-sentinel" aria-hidden="true" data-testid="library-sentinel" />
+            )}
+          </>
+        )}
       </div>
     </motion.section>
   );
@@ -1045,24 +1383,25 @@ function DownloadsScreen({
   onPlay: (item: GameLibraryItem) => void;
   onFocus: (focusId: string) => void;
 }) {
+  const { t } = useI18n();
   const summary = summarizeDownloads(downloads);
   const description = summary.active > 0
-    ? `Single active slot in use / ${downloads.length} persisted records`
-    : `Single active slot ready / ${downloads.length} persisted records`;
+    ? t.dashboard.downloads.activeDescription(downloads.length)
+    : t.dashboard.downloads.idleDescription(downloads.length);
 
   return (
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="rh-screen rh-panel">
       <div className="rh-downloads-center" data-testid="downloads-center">
-        <ScreenHeader eyebrow="Downloads" title="Download Center" description={description} />
+        <ScreenHeader eyebrow={t.dashboard.downloads.eyebrow} title={t.dashboard.downloads.title} description={description} />
         <div className="rh-download-summary">
-          <DownloadMetric label="Active" value={String(summary.active)} tone="active" />
-          <DownloadMetric label="Paused" value={String(summary.paused)} tone="paused" />
-          <DownloadMetric label="Errors" value={String(summary.errors)} tone="error" />
-          <DownloadMetric label="Downloaded" value={formatBytes(summary.downloadedBytes)} tone="ready" />
+          <DownloadMetric label={t.dashboard.downloads.active} value={String(summary.active)} tone="active" />
+          <DownloadMetric label={t.dashboard.downloads.paused} value={String(summary.paused)} tone="paused" />
+          <DownloadMetric label={t.dashboard.downloads.errors} value={String(summary.errors)} tone="error" />
+          <DownloadMetric label={t.dashboard.downloads.downloaded} value={formatBytes(summary.downloadedBytes)} tone="ready" />
         </div>
         <div className="rh-download-list">
           {downloads.length === 0 ? (
-            <div className="rh-empty-compact">No persisted downloads. Start a catalog download from Home or Library.</div>
+            <div className="rh-empty-compact">{t.dashboard.downloads.empty}</div>
           ) : downloads.map((download) => {
             const item = itemsByGameId.get(download.gameId) ?? null;
             return (
@@ -1107,10 +1446,11 @@ function DownloadRow({
   onPlay: (item: GameLibraryItem) => void;
   onFocus: (focusId: string) => void;
 }) {
+  const { t } = useI18n();
   const active = ACTIVE_DOWNLOAD_STATUSES.includes(download.status);
   const resumable = RESUMABLE_DOWNLOAD_STATUSES.includes(download.status);
   const cancellable = !['completed', 'cancelled', 'cancelling'].includes(download.status);
-  const statusHint = downloadStatusHint(download);
+  const statusHint = downloadStatusHint(download, t);
 
   return (
     <article className="rh-download-row" data-testid="download-row">
@@ -1126,7 +1466,7 @@ function DownloadRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <div className="truncate text-sm font-black">{item?.game.title ?? download.gameId}</div>
-          <span className="rounded border border-white/10 px-2 py-1 text-[10px] uppercase text-white/54">{download.status}</span>
+          <span className="rounded border border-white/10 px-2 py-1 text-[10px] uppercase text-white/54">{t.gameDetails.downloadTitles[download.status]}</span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded bg-black/42">
           <div className="h-full rounded bg-hydra-accent" style={{ width: `${download.status === 'completed' ? 100 : download.progressPercent}%` }} />
@@ -1134,7 +1474,7 @@ function DownloadRow({
         <div className="mt-2 flex flex-wrap gap-4 text-xs text-white/42">
           <span>{formatBytes(download.downloadedBytes)} / {formatBytes(download.totalBytes)}</span>
           <span>{formatSpeed(download.downloadSpeedBytesPerSec)}</span>
-          <span>{download.peersCount} peers</span>
+          <span>{download.peersCount} {t.common.peers}</span>
         </div>
         {download.saveDir && <div className="mt-2 truncate text-xs text-white/32">{download.saveDir}</div>}
         {statusHint && <div className="mt-2 text-xs text-white/42">{statusHint}</div>}
@@ -1146,7 +1486,7 @@ function DownloadRow({
             focusId={`download-action:pause:${encodeURIComponent(download.gameId)}`}
             onFocus={onFocus}
             busy={busyAction === `pause:${download.gameId}`}
-            label="Pause"
+            label={t.dashboard.downloads.pause}
             icon={<Pause className="h-3.5 w-3.5" />}
             onClick={() => onPause(download.gameId)}
           />
@@ -1156,7 +1496,7 @@ function DownloadRow({
             focusId={`download-action:${download.status === 'error' ? 'retry' : 'resume'}:${encodeURIComponent(download.gameId)}`}
             onFocus={onFocus}
             busy={busyAction === `resume:${download.gameId}`}
-            label={download.status === 'error' ? 'Retry' : 'Resume'}
+            label={download.status === 'error' ? t.dashboard.downloads.retry : t.dashboard.downloads.resume}
             icon={<RotateCw className="h-3.5 w-3.5" />}
             onClick={() => onResume(download.gameId)}
           />
@@ -1166,7 +1506,7 @@ function DownloadRow({
             focusId={`download-action:play:${encodeURIComponent(download.gameId)}`}
             onFocus={onFocus}
             busy={busyAction === `play:${download.gameId}`}
-            label="Play"
+            label={t.dashboard.downloads.play}
             icon={<Play className="h-3.5 w-3.5" />}
             onClick={() => onPlay(item)}
           />
@@ -1176,7 +1516,7 @@ function DownloadRow({
             focusId={`download-action:cancel:${encodeURIComponent(download.gameId)}`}
             onFocus={onFocus}
             busy={busyAction === `cancel:${download.gameId}`}
-            label="Cancel"
+            label={t.dashboard.downloads.cancel}
             icon={<Ban className="h-3.5 w-3.5" />}
             onClick={() => onCancel(download.gameId)}
             danger
@@ -1221,8 +1561,8 @@ function IconAction({
 function ScreenHeader({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
   return (
     <header className="mb-5">
-      <div className="text-xs font-black uppercase tracking-[0.18em] text-hydra-accent">{eyebrow}</div>
-      <h1 className="mt-2 text-3xl font-black uppercase tracking-normal">{title}</h1>
+      <div className="text-sm font-semibold text-hydra-accent">{eyebrow}</div>
+      <h1 className="mt-2 text-3xl font-bold tracking-normal">{title}</h1>
       <p className="mt-1 text-sm text-white/46">{description}</p>
     </header>
   );
@@ -1253,6 +1593,11 @@ function StatsLine({ label, value }: { label: string; value: string }) {
   );
 }
 
+function displayActivityTitle(title: string, t: UiText) {
+  if (title === 'Download completed') return t.dashboard.messages.downloadCompleted;
+  return title;
+}
+
 function normalizeUpdateCheckError(error: unknown): UpdateCheckError {
   if (isUpdateCheckError(error)) return error;
   if (typeof error === 'object' && error !== null && 'kind' in error) {
@@ -1276,10 +1621,10 @@ function isUpdateCheckError(error: unknown): error is UpdateCheckError {
   );
 }
 
-function formatEventTime(timestamp: string) {
+function formatEventTime(timestamp: string, locale: string) {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 }
 
 function formatBytes(bytes: number) {
@@ -1293,8 +1638,8 @@ function formatSpeed(bytesPerSecond: number) {
   return `${(bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s`;
 }
 
-function formatClock(date: Date) {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function formatClock(date: Date, locale: string) {
+  return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 }
 
 function filterCountLabel(filter: LibraryFilter, totalCount: number, allItems: GameLibraryItem[]) {
@@ -1317,13 +1662,13 @@ function summarizeDownloads(downloads: TorrentDownloadRecord[]) {
   });
 }
 
-function downloadStatusHint(download: TorrentDownloadRecord) {
-  if (download.status === 'interrupted') return 'Restored after restart. Resume to continue.';
-  if (download.status === 'paused') return 'Paused state is persisted.';
-  if (download.status === 'resolving') return 'Resolving magnet metadata.';
-  if (download.status === 'cancelling') return 'Cancelling and cleaning partial files.';
-  if (download.status === 'cancelled') return 'Cancelled session retained for diagnostics.';
-  if (download.status === 'error' && !download.errorMessage) return 'Retry from the persisted download state.';
+function downloadStatusHint(download: TorrentDownloadRecord, t: UiText) {
+  if (download.status === 'interrupted') return t.dashboard.downloads.statusHints.interrupted;
+  if (download.status === 'paused') return t.dashboard.downloads.statusHints.paused;
+  if (download.status === 'resolving') return t.dashboard.downloads.statusHints.resolving;
+  if (download.status === 'cancelling') return t.dashboard.downloads.statusHints.cancelling;
+  if (download.status === 'cancelled') return t.dashboard.downloads.statusHints.cancelled;
+  if (download.status === 'error' && !download.errorMessage) return t.dashboard.downloads.statusHints.error;
   return null;
 }
 

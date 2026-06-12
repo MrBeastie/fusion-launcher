@@ -1,0 +1,112 @@
+{
+  "metadata": {
+    "id": "retrohydra-scraper-library",
+    "name": "RetroHydra Scraper Test Library",
+    "version": "1.0.0",
+    "schemaVersion": 3,
+    "maintainer": "RetroHydra Team",
+    "homepageUrl": "https://retrohydra.local/scraper-library",
+    "license": "Catalog metadata only. No ROMs, BIOS, firmware, or keys are distributed. Import your own legally obtained game files.",
+    "trustLevel": "community",
+    "updatedAt": "2026-06-09T00:00:00Z"
+  },
+  "system_files": [],
+  "catalog": [
+    {
+      "id": "smb3",
+      "platform": "nes",
+      "title": "Super Mario Bros. 3",
+      "description": "User-provided NES title used to exercise CRC32 hash matching against ScreenScraper.",
+      "contentMode": "user_provided",
+      "setupProfileId": "nes-mesen",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally obtained Super Mario Bros. 3 .nes ROM."
+        }
+      ],
+      "expectedExtensions": [".nes"],
+      "requiredSystemFileIds": []
+    },
+    {
+      "id": "chrono-trigger",
+      "platform": "snes",
+      "title": "Chrono Trigger",
+      "description": "User-provided SNES title for hash and name matching plus SteamGridDB artwork enrichment.",
+      "contentMode": "user_provided",
+      "setupProfileId": "snes-mesen",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally obtained Chrono Trigger .sfc/.smc ROM."
+        }
+      ],
+      "expectedExtensions": [".sfc", ".smc"],
+      "requiredSystemFileIds": []
+    },
+    {
+      "id": "ocarina-of-time",
+      "platform": "n64",
+      "title": "The Legend of Zelda: Ocarina of Time",
+      "description": "User-provided Nintendo 64 title for verifying name fallback and hero/logo artwork.",
+      "contentMode": "user_provided",
+      "setupProfileId": "n64-rmg",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally obtained Ocarina of Time .z64/.n64 ROM."
+        }
+      ],
+      "expectedExtensions": [".z64", ".n64"],
+      "requiredSystemFileIds": []
+    },
+    {
+      "id": "metroid-fusion",
+      "platform": "gba",
+      "title": "Metroid Fusion",
+      "description": "User-provided Game Boy Advance title for CRC32 hash matching.",
+      "contentMode": "user_provided",
+      "setupProfileId": "gba-mgba",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally obtained Metroid Fusion .gba ROM."
+        }
+      ],
+      "expectedExtensions": [".gba"],
+      "requiredSystemFileIds": []
+    },
+    {
+      "id": "shadow-of-the-colossus",
+      "platform": "ps2",
+      "title": "Shadow of the Colossus",
+      "description": "User-provided PlayStation 2 title. Compressed .chd images fall back to name matching.",
+      "contentMode": "user_provided",
+      "setupProfileId": "ps2-pcsx2",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally obtained Shadow of the Colossus .iso/.chd image."
+        }
+      ],
+      "expectedExtensions": [".iso", ".chd"],
+      "requiredSystemFileIds": []
+    },
+    {
+      "id": "god-of-war-chains-of-olympus",
+      "platform": "psp",
+      "title": "God of War: Chains of Olympus",
+      "description": "User-provided PSP title for verifying ScreenScraper matching on handheld platforms.",
+      "contentMode": "user_provided",
+      "setupProfileId": "psp-ppsspp",
+      "downloads": [
+        {
+          "kind": "user_provided",
+          "instructions": "Import your own legally obtained God of War: Chains of Olympus .iso/.cso image."
+        }
+      ],
+      "expectedExtensions": [".iso", ".cso"],
+      "requiredSystemFileIds": []
+    }
+  ]
+}

@@ -16,15 +16,16 @@ use crate::downloads::{
 };
 use crate::game_files;
 use crate::logging;
-use crate::platform::{default_launch_args_template, is_mvp_platform, MVP_PLATFORM_CONFIGS};
 use crate::schema::{
     AssetView, CatalogGameView, DiagnosticsBundle, DiagnosticsPaths, DownloadRecord,
     EmulatorConfig, GameDownloadStartReport, GameSetupEmulatorState, GameSetupGameFileState,
     GameSetupLaunchState, GameSetupState, GameSetupSystemFileState, HealthCheckItem, HealthReport,
-    ImportAssetFileReport, ImportGameFileReport, InstallTarget, LibraryGameStatus, OnboardingState,
-    PlatformSetupProfile, ProfileEmulatorConfig, ProfileSystemFileRequirement, RepositoryGame,
-    RepositoryMetadata, RepositoryPreview, RepositorySchema, RepositorySummary, RequirementItem,
-    RequirementsReport, SourceUri, TorrentDownloadRecord, TrustedExecutable,
+    ImportAssetFileReport, ImportGameFileReport, InstallTarget, LibraryGameStatus,
+    LibraryScrapeStatus, OnboardingState, PlatformSetupProfile, ProfileEmulatorConfig,
+    ProfileSystemFileRequirement, RepositoryGame, RepositoryMetadata, RepositoryPreview,
+    RepositorySchema, RepositorySummary, RequirementItem, RequirementsReport, ScrapeCandidate,
+    ScrapeStateView, ScreenScraperStatus, SourceUri, SteamGridDbStatus, TorrentDownloadRecord,
+    TrustedExecutable,
 };
 use crate::security::{validate_platform, validate_repository_schema, validate_repository_url};
 use crate::setup_profiles;
@@ -203,7 +204,7 @@ pub fn get_onboarding_state(state: State<'_, AppState>) -> Result<OnboardingStat
     let valid_emulator_platforms = store
         .list_emulator_configs()?
         .into_iter()
-        .filter(|config| is_mvp_platform(&config.platform))
+        .filter(|config| setup_profiles::has_default_setup_profile(&config.platform))
         .filter(|config| config.status == "valid")
         .map(|config| config.platform)
         .collect::<HashSet<_>>();
@@ -256,6 +257,98 @@ pub fn get_game(
     state: State<'_, AppState>,
 ) -> Result<Option<CatalogGameView>, String> {
     lock_store(&state)?.get_game(&game_id)
+}
+
+#[tauri::command]
+pub async fn scrape_game(
+    game_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    crate::scraper::scrape_game(app, state.inner().clone(), game_id).await
+}
+
+#[tauri::command]
+pub fn get_scrape_state(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<ScrapeStateView, String> {
+    let store = lock_store(&state)?;
+    Ok(store
+        .get_scrape_state(&game_id)?
+        .unwrap_or_else(|| crate::scraper::default_state(&game_id)))
+}
+
+#[tauri::command]
+pub fn list_scrape_candidates(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ScrapeCandidate>, String> {
+    let store = lock_store(&state)?;
+    Ok(store
+        .get_scrape_state(&game_id)?
+        .map(|state| state.candidates)
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn apply_scrape_override(
+    game_id: String,
+    provider_game_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    crate::scraper::apply_override(app, state.inner().clone(), game_id, provider_game_id).await
+}
+
+#[tauri::command]
+pub fn clear_scrape_override(
+    game_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<bool, String> {
+    crate::scraper::clear_override(&app, state.inner(), &game_id)
+}
+
+#[tauri::command]
+pub fn save_screenscraper_credentials(
+    ssid: String,
+    sspassword: String,
+    region: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ScreenScraperStatus, String> {
+    crate::scraper::save_credentials(state.inner(), &ssid, &sspassword, region.as_deref())
+}
+
+#[tauri::command]
+pub fn get_screenscraper_status(state: State<'_, AppState>) -> Result<ScreenScraperStatus, String> {
+    crate::scraper::get_status(state.inner())
+}
+
+#[tauri::command]
+pub fn save_steamgriddb_key(
+    api_key: String,
+    state: State<'_, AppState>,
+) -> Result<SteamGridDbStatus, String> {
+    crate::scraper::save_steamgriddb_key(state.inner(), &api_key)
+}
+
+#[tauri::command]
+pub fn get_steamgriddb_status(state: State<'_, AppState>) -> Result<SteamGridDbStatus, String> {
+    crate::scraper::get_steamgriddb_status(state.inner())
+}
+
+#[tauri::command]
+pub fn scrape_library(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<LibraryScrapeStatus, String> {
+    crate::scraper::scrape_library(app, state.inner().clone())
+}
+
+#[tauri::command]
+pub fn cancel_library_scrape(state: State<'_, AppState>) -> Result<LibraryScrapeStatus, String> {
+    crate::scraper::cancel_library_scrape(state.inner())
 }
 
 #[tauri::command]
@@ -341,13 +434,6 @@ pub fn select_profile_emulator(
         None,
         Some(&profile.launch.args_template),
     )?;
-    let _ = store.upsert_emulator_config(
-        &profile.platform,
-        Some(normalized_path),
-        status,
-        None,
-        Some(&profile.launch.args_template),
-    );
     Ok(config)
 }
 
@@ -410,7 +496,7 @@ pub fn save_emulator_config(
     let normalized_path = exe_path.trim();
     let status = validate_emulator_status(Some(normalized_path));
     let template = normalize_launch_args_template(launch_args_template)
-        .or_else(|| default_launch_args_template(&platform).map(ToString::to_string));
+        .or_else(|| setup_profiles::default_launch_args_for(&platform));
 
     lock_store(&state)?.upsert_emulator_config(
         &platform,
@@ -569,6 +655,7 @@ pub fn import_game_file(
     game_id: String,
     source_path: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<ImportGameFileReport, String> {
     let download_root = match download_root(&state) {
         Ok(path) => path,
@@ -579,12 +666,16 @@ pub fn import_game_file(
         Err(_) => return Ok(import_game_error("", "", "store_failed", None)),
     };
 
-    Ok(import_game_file_into_store(
+    let report = import_game_file_into_store(
         &store,
         &download_root,
         &game_id,
         Path::new(source_path.trim()),
-    ))
+    );
+    if report.error_code.is_none() {
+        spawn_metadata_scrape(&app, state.inner(), report.game_id.clone());
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -742,7 +833,36 @@ pub(crate) async fn start_game_download_internal(
                 &[("game_id", game.id.as_str()), ("source", source_kind)],
             );
 
-            let file = match download_source_to_file(source, &destination).await {
+            let download_result = {
+                let game_id = game.id.clone();
+                crate::downloads::download_source_to_file_with_progress(
+                    source,
+                    &destination,
+                    |downloaded, total| {
+                        let percent = match total {
+                            Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
+                            _ => 0.0,
+                        };
+                        if let Ok(store) = lock_app_store(state) {
+                            if let Ok(record) = store.update_torrent_progress(
+                                &game_id,
+                                "downloading",
+                                percent,
+                                downloaded,
+                                total.unwrap_or(0),
+                                0,
+                                0,
+                                0,
+                            ) {
+                                drop(store);
+                                emit_direct_download_record(app, &record);
+                            }
+                        }
+                    },
+                )
+                .await
+            };
+            let file = match download_result {
                 Ok(file) => file,
                 Err(error) => {
                     let failed = lock_app_store(state)?.record_direct_game_download_failed(
@@ -780,6 +900,7 @@ pub(crate) async fn start_game_download_internal(
                 "game_download_completed",
                 &[("game_id", game.id.as_str()), ("source", source_kind)],
             );
+            spawn_metadata_scrape(app, state, game.id.clone());
             Ok(GameDownloadStartReport {
                 game_id: game.id,
                 source_kind: source_kind.to_string(),
@@ -904,6 +1025,7 @@ pub async fn remove_game(
     let store = lock_store(&state)?;
     let mut changed = store.delete_download(&game_id)?;
     changed = store.delete_torrent_download(&game_id)? || changed;
+    changed = store.delete_scrape_artifacts(&game_id)? || changed;
     logging::log_event(
         &state.data_dir,
         "game_removed",
@@ -1171,15 +1293,9 @@ fn build_setup_emulator_state(
 ) -> Result<GameSetupEmulatorState, String> {
     if let Some(profile) = profile {
         let profile_config = store.get_profile_emulator_config(&profile.id)?;
-        let legacy_config = store.get_emulator_config(&profile.platform)?;
         let exe_path = profile_config
             .as_ref()
-            .and_then(|config| config.exe_path.clone())
-            .or_else(|| {
-                legacy_config
-                    .as_ref()
-                    .and_then(|config| config.exe_path.clone())
-            });
+            .and_then(|config| config.exe_path.clone());
         let status = validate_emulator_status(exe_path.as_deref());
         let ready = status == "valid";
         return Ok(GameSetupEmulatorState {
@@ -1205,11 +1321,8 @@ fn build_setup_emulator_state(
         });
     }
 
-    let platform = crate::platform::platform_config(&game.platform);
-    let legacy_config = store.get_emulator_config(&game.platform)?;
-    let exe_path = legacy_config
-        .as_ref()
-        .and_then(|config| config.exe_path.clone());
+    let config = store.get_emulator_config(&game.platform)?;
+    let exe_path = config.as_ref().and_then(|config| config.exe_path.clone());
     let status = validate_emulator_status(exe_path.as_deref());
     Ok(GameSetupEmulatorState {
         status: if status == "valid" {
@@ -1219,8 +1332,7 @@ fn build_setup_emulator_state(
         },
         profile_id: None,
         platform: game.platform.clone(),
-        emulator_name: platform
-            .map(|platform| platform.emulator_name.to_string())
+        emulator_name: setup_profiles::platform_emulator_name(&game.platform)
             .unwrap_or_else(|| format!("{} emulator", game.platform.to_uppercase())),
         install_mode: "manual".to_string(),
         executable_path: exe_path,
@@ -1956,6 +2068,17 @@ fn import_game_file_into_store(
                     Some(imported.sha256),
                 );
             }
+            if store
+                .upsert_rom_hash_sha256(&game.id, &imported.sha256, total_bytes)
+                .is_err()
+            {
+                return import_game_error(
+                    &game.id,
+                    &imported.installed_path,
+                    "store_failed",
+                    Some(imported.sha256),
+                );
+            }
             ImportGameFileReport {
                 status: imported.status.to_string(),
                 game_id: game.id,
@@ -2379,6 +2502,14 @@ fn emit_direct_download_record(app: &AppHandle, record: &TorrentDownloadRecord) 
     );
 }
 
+fn spawn_metadata_scrape(app: &AppHandle, state: &AppState, game_id: String) {
+    let app = app.clone();
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::scraper::scrape_game(app, state, game_id).await;
+    });
+}
+
 fn build_health_report(state: &AppState) -> Result<HealthReport, String> {
     let store = lock_app_store(state)?;
     let repositories = store.list_repositories()?;
@@ -2450,10 +2581,11 @@ fn build_health_report(state: &AppState) -> Result<HealthReport, String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    let emulators = MVP_PLATFORM_CONFIGS
-        .iter()
-        .map(|platform| {
-            let config = configs.iter().find(|config| config.platform == platform.id);
+    let emulators = setup_profiles::mvp_platforms()
+        .map(|profile| {
+            let config = configs
+                .iter()
+                .find(|config| config.platform == profile.platform);
             let path = config.and_then(|config| config.exe_path.clone());
             let status = match path
                 .as_deref()
@@ -2463,14 +2595,24 @@ fn build_health_report(state: &AppState) -> Result<HealthReport, String> {
                 Some("missing") => "missing",
                 _ => "missing",
             };
+            let executable_hint = profile
+                .emulator
+                .executable_name
+                .clone()
+                .or_else(|| profile.emulator.executable_candidates.first().cloned())
+                .unwrap_or_else(|| format!("{} emulator", profile.platform.to_uppercase()));
+            let platform_label = setup_profiles::platform_display_label(&profile.platform)
+                .unwrap_or_else(|| profile.platform.to_uppercase());
+            let emulator_name = setup_profiles::platform_emulator_name(&profile.platform)
+                .unwrap_or_else(|| format!("{} emulator", profile.platform.to_uppercase()));
             HealthCheckItem {
-                id: format!("emulator:{}", platform.id),
-                label: format!("{} ({})", platform.emulator_name, platform.label),
+                id: format!("emulator:{}", profile.platform),
+                label: format!("{emulator_name} ({platform_label})"),
                 status: status.to_string(),
                 message: if status == "ready" {
-                    Some(platform.executable_hint.to_string())
+                    Some(executable_hint.clone())
                 } else {
-                    Some(format!("Expected executable: {}", platform.executable_hint))
+                    Some(format!("Expected executable: {executable_hint}"))
                 },
                 action: Some(if status == "ready" {
                     "openEmulatorFolder".to_string()
@@ -2692,13 +2834,6 @@ pub(crate) fn run_package_smoke(data_dir: &Path) -> Result<(), String> {
         Some("package-smoke"),
         Some("{game_path}"),
     )?;
-    store.upsert_emulator_config(
-        "nes",
-        Some(&current_exe_string),
-        "valid",
-        Some("package-smoke"),
-        Some("{game_path}"),
-    )?;
 
     let Some(SourceUri::Bundled { path, sha256, .. }) = demo_repo.catalog[0].downloads.first()
     else {
@@ -2738,13 +2873,6 @@ pub(crate) fn run_package_smoke(data_dir: &Path) -> Result<(), String> {
         .ok_or_else(|| "switch-manual profile is missing.".to_string())?;
     store.upsert_profile_emulator_config(
         "switch-manual",
-        "switch",
-        Some(&current_exe_string),
-        "valid",
-        Some("package-smoke"),
-        Some("{game_path}"),
-    )?;
-    store.upsert_emulator_config(
         "switch",
         Some(&current_exe_string),
         "valid",

@@ -10,6 +10,7 @@ interface AppShellProps {
   repositoriesCount: number;
   activeDownloadsCount: number;
   onNavigate: (view: LauncherView) => void;
+  onOpenSettings: () => void;
   onFocus: (focusId: string) => void;
   children: ReactNode;
 }
@@ -19,6 +20,7 @@ export function AppShell({
   repositoriesCount,
   activeDownloadsCount,
   onNavigate,
+  onOpenSettings,
   onFocus,
   children
 }: AppShellProps) {
@@ -30,6 +32,7 @@ export function AppShell({
           repositoriesCount={repositoriesCount}
           activeDownloadsCount={activeDownloadsCount}
           onNavigate={onNavigate}
+          onOpenSettings={onOpenSettings}
           onFocus={onFocus}
         />
         <section className="rh-main-surface">

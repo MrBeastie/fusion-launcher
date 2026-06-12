@@ -107,7 +107,7 @@ export const PLATFORM_SETUP_PROFILES: PlatformSetupProfile[] = [
         extensions: ['.bin', '.rom'],
         targetName: 'bios/ps2-bios.bin',
         sourceMode: 'user_provided',
-        notes: 'Import a BIOS image dumped from hardware you own.'
+        notes: 'Импортируй BIOS-образ, снятый с твоего собственного устройства.'
       }
     ],
     launch: { argsTemplate: '-fullscreen -- {game_path}', workingDirectory: 'emulator_dir' }
@@ -156,7 +156,7 @@ export const PLATFORM_SETUP_PROFILES: PlatformSetupProfile[] = [
         extensions: ['.bin', '.rom'],
         targetName: 'bios/scph5501.bin',
         sourceMode: 'user_provided',
-        notes: 'Import a BIOS image dumped from hardware you own.'
+        notes: 'Импортируй BIOS-образ, снятый с твоего собственного устройства.'
       }
     ],
     launch: { argsTemplate: '-batch "{game_path}"', workingDirectory: 'emulator_dir' }
@@ -164,10 +164,10 @@ export const PLATFORM_SETUP_PROFILES: PlatformSetupProfile[] = [
   {
     id: 'switch-manual',
     platform: 'switch',
-    displayName: 'Nintendo Switch / Manual Emulator',
+    displayName: 'Nintendo Switch / ручная настройка',
     emulator: {
       installMode: 'manual',
-      emulatorName: 'Switch emulator',
+      emulatorName: 'Switch-эмулятор',
       executableName: 'Ryujinx.exe',
       executableCandidates: ['Ryujinx.exe', 'suyu.exe']
     },
@@ -186,7 +186,7 @@ export const PLATFORM_SETUP_PROFILES: PlatformSetupProfile[] = [
         extensions: ['.keys'],
         targetName: 'prod.keys',
         sourceMode: 'user_provided',
-        notes: 'Import keys from your own legally owned console environment.'
+        notes: 'Импортируй prod.keys из своей легально принадлежащей консоли.'
       },
       {
         id: 'switch-firmware',
@@ -196,7 +196,7 @@ export const PLATFORM_SETUP_PROFILES: PlatformSetupProfile[] = [
         extensions: ['.zip'],
         targetName: 'firmware.zip',
         sourceMode: 'user_provided',
-        notes: 'Optional firmware package provided by the user.'
+        notes: 'Опциональный firmware-пакет, который пользователь добавляет сам.'
       }
     ],
     launch: { argsTemplate: '{game_path}', workingDirectory: 'emulator_dir' }
@@ -204,10 +204,10 @@ export const PLATFORM_SETUP_PROFILES: PlatformSetupProfile[] = [
   {
     id: 'snes-manual',
     platform: 'snes',
-    displayName: 'Super Nintendo / Manual Emulator',
+    displayName: 'Super Nintendo / ручная настройка',
     emulator: {
       installMode: 'manual',
-      emulatorName: 'SNES emulator',
+      emulatorName: 'SNES-эмулятор',
       executableName: 'bsnes.exe',
       executableCandidates: ['bsnes.exe', 'snes9x.exe']
     },

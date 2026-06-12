@@ -1,42 +1,47 @@
 'use client';
 
+import { useI18n } from '../I18nProvider';
 import type { LauncherView } from '../../stores/launcherStore.ts';
 
-const VIEW_HINTS: Record<LauncherView, Array<{ key: string; label: string; tone: string }>> = {
+type HintLabel = 'select' | 'back' | 'details' | 'open' | 'home' | 'filters' | 'action' | 'retry';
+
+const VIEW_HINTS: Record<LauncherView, Array<{ key: string; label: HintLabel; tone: string }>> = {
   home: [
-    { key: 'A', label: 'Select', tone: 'bg-green-500' },
-    { key: 'B', label: 'Back', tone: 'bg-red-500' },
-    { key: 'Y', label: 'Details', tone: 'bg-yellow-500' }
+    { key: 'A', label: 'select', tone: 'primary' },
+    { key: 'B', label: 'back', tone: 'quiet' },
+    { key: 'Y', label: 'details', tone: 'warm' }
   ],
   library: [
-    { key: 'A', label: 'Open', tone: 'bg-green-500' },
-    { key: 'B', label: 'Home', tone: 'bg-red-500' },
-    { key: 'Y', label: 'Filters', tone: 'bg-yellow-500' }
+    { key: 'A', label: 'open', tone: 'primary' },
+    { key: 'B', label: 'home', tone: 'quiet' },
+    { key: 'Y', label: 'filters', tone: 'warm' }
   ],
   downloads: [
-    { key: 'A', label: 'Action', tone: 'bg-green-500' },
-    { key: 'B', label: 'Home', tone: 'bg-red-500' },
-    { key: 'X', label: 'Retry', tone: 'bg-blue-500' }
+    { key: 'A', label: 'action', tone: 'primary' },
+    { key: 'B', label: 'home', tone: 'quiet' },
+    { key: 'X', label: 'retry', tone: 'cool' }
   ],
   explore: [
-    { key: 'A', label: 'Open', tone: 'bg-green-500' },
-    { key: 'B', label: 'Home', tone: 'bg-red-500' }
+    { key: 'A', label: 'open', tone: 'primary' },
+    { key: 'B', label: 'home', tone: 'quiet' }
   ],
   collections: [
-    { key: 'A', label: 'Open', tone: 'bg-green-500' },
-    { key: 'B', label: 'Home', tone: 'bg-red-500' }
+    { key: 'A', label: 'open', tone: 'primary' },
+    { key: 'B', label: 'home', tone: 'quiet' }
   ]
 };
 
 export function ControllerHintBar({ activeView }: { activeView: LauncherView }) {
+  const { t } = useI18n();
+
   return (
     <div className="rh-hint-bar">
       {VIEW_HINTS[activeView].map((hint) => (
         <div key={`${hint.key}:${hint.label}`} className="flex items-center gap-2">
-          <span className={`grid h-4 w-4 place-items-center rounded-full text-[10px] font-black text-black ${hint.tone}`}>
+          <span className={`rh-hint-key rh-hint-key-${hint.tone}`}>
             {hint.key}
           </span>
-          <span>{hint.label}</span>
+          <span>{t.shell.hints[hint.label]}</span>
         </div>
       ))}
     </div>

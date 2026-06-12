@@ -63,6 +63,57 @@ export interface GameMetadata {
   externalIds?: Record<string, string>;
 }
 
+export type ScrapeStatus = 'pending' | 'hashing' | 'fetching' | 'ready' | 'ambiguous' | 'failed' | 'skipped';
+export type ScrapeMatchKind = 'hash' | 'name' | 'override' | string;
+
+export interface ScrapeCandidate {
+  provider: string;
+  providerGameId: string;
+  title: string;
+  platform?: string | null;
+  releaseYear?: number | null;
+  developer?: string | null;
+  cover?: string | null;
+  matchKind: ScrapeMatchKind;
+}
+
+export interface ScrapeState {
+  gameId: string;
+  status: ScrapeStatus;
+  matchKind?: ScrapeMatchKind | null;
+  candidates: ScrapeCandidate[];
+  message?: string | null;
+  updatedAt: string;
+}
+
+export interface ScreenScraperStatus {
+  configured: boolean;
+  ssid?: string | null;
+  region: 'auto' | 'eu' | 'us' | 'jp' | string;
+  dailyRequests: number;
+  dailyLimit: number;
+}
+
+export interface SteamGridDbStatus {
+  configured: boolean;
+  keySource: 'user' | 'built-in' | 'none' | string;
+  dailyRequests: number;
+  dailyLimit: number;
+  pendingBatch: number;
+  batchRunning: boolean;
+}
+
+export interface LibraryScrapeStatus {
+  running: boolean;
+  pending: number;
+}
+
+export interface LibraryScrapeProgressEvent {
+  done: number;
+  total: number;
+  currentGameId?: string | null;
+}
+
 export interface RepositoryAsset {
   id: string;
   platform: Platform;
@@ -295,21 +346,6 @@ export interface EmulatorConfig {
   lastValidatedAt?: string;
   version?: string;
   launchArgsTemplate?: string;
-}
-
-export type RecommendedEmulatorInstallStatus = 'available' | 'installed' | 'manual';
-
-export interface RecommendedEmulator {
-  platform: Platform;
-  platformLabel: string;
-  emulatorName: string;
-  version?: string | null;
-  downloadUrl?: string | null;
-  sha256?: string | null;
-  executableName: string;
-  status: RecommendedEmulatorInstallStatus;
-  installedPath?: string | null;
-  message?: string | null;
 }
 
 export interface TorrentStartReport {

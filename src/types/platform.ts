@@ -69,7 +69,7 @@ export const PLATFORM_DEFAULT_LAUNCH_ARGS: Record<MvpPlatform, string> = {
   switch: '{game_path}',
   ps1: '-batch "{game_path}"',
   ps2: '-fullscreen -- "{game_path}"',
-  gba: '{game_path}',
+  gba: '-f {game_path}',
   nes: '{game_path}'
 };
 

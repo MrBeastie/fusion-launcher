@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 import {
   Ban,
+  DatabaseZap,
   Download as DownloadIcon,
   Loader2,
   Pause,
@@ -13,11 +15,13 @@ import {
   ShieldCheck,
   X
 } from 'lucide-react';
+import { useI18n } from '@/components/I18nProvider';
 import { LaunchErrorModal } from '@/components/LaunchErrorModal';
 import { InstallProgressOverlay } from '@/components/InstallProgressOverlay';
 import { GameArt } from '@/components/shell/GamePoster';
 import { useDownloadState } from '@/hooks/useDownloadState';
 import { api } from '@/lib/api';
+import { displayProductText } from '@/lib/brandText';
 import { isDirectGameDownload } from '@/lib/downloadActions';
 import { normalizeLaunchFailure } from '@/lib/launchErrors';
 import { useInstallGame } from '@/lib/orchestratorApi';
@@ -31,19 +35,9 @@ import type {
   LaunchFailure,
   RequirementItem,
   RequirementsReport,
-  TorrentDownloadStatus
+  ScrapeCandidate,
+  ScrapeState,
 } from '@/types/repository';
-
-const DOWNLOAD_TITLES: Record<TorrentDownloadStatus, string> = {
-  resolving: 'Resolving magnet',
-  downloading: 'Downloading',
-  paused: 'Paused',
-  interrupted: 'Interrupted',
-  completed: 'Downloaded',
-  cancelling: 'Cancelling',
-  cancelled: 'Cancelled',
-  error: 'Download error'
-};
 
 interface GameDetailsModalProps {
   game: CatalogGame;
@@ -60,6 +54,7 @@ export function GameDetailsModal({
   onOpenSettings,
   onRefresh
 }: GameDetailsModalProps) {
+  const { t } = useI18n();
   const [requirements, setRequirements] = useState<RequirementsReport | null>(null);
   const [setupState, setSetupState] = useState<GameSetupState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -67,6 +62,7 @@ export function GameDetailsModal({
   const [showSetupDetails, setShowSetupDetails] = useState(false);
   const [defaultSaveDir, setDefaultSaveDir] = useState<string | null>(null);
   const [launchFailure, setLaunchFailure] = useState<LaunchFailure | null>(null);
+  const [scrapeState, setScrapeState] = useState<ScrapeState | null>(null);
   const download = useDownloadState(game.id);
   const orchestrator = useInstallGame(game.id);
   const userProvidedGame = isUserProvidedGame(game);
@@ -105,8 +101,58 @@ export function GameDetailsModal({
     }
   };
 
+  const loadScrapeState = async () => {
+    try {
+      setScrapeState(await api.getScrapeState(game.id));
+    } catch {
+      setScrapeState(null);
+    }
+  };
+
   useEffect(() => {
     loadRequirements();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getScrapeState(game.id)
+      .then((state) => {
+        if (!cancelled) setScrapeState(state);
+      })
+      .catch(() => {
+        if (!cancelled) setScrapeState(null);
+      });
+
+    if (!isTauriRuntime()) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    let cleanup: (() => void) | undefined;
+    void Promise.all([
+      listen<{ gameId: string }>('metadata:ready', (event) => {
+        if (event.payload.gameId === game.id) void loadScrapeState();
+      }),
+      listen<{ gameId: string }>('metadata:state', (event) => {
+        if (event.payload.gameId === game.id) void loadScrapeState();
+      }),
+      listen<{ gameId: string }>('metadata:ambiguous', (event) => {
+        if (event.payload.gameId === game.id) void loadScrapeState();
+      })
+    ]).then((unlisteners) => {
+      if (cancelled) {
+        unlisteners.forEach((unlisten) => unlisten());
+        return;
+      }
+      cleanup = () => unlisteners.forEach((unlisten) => unlisten());
+    });
+
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.id]);
 
@@ -123,7 +169,7 @@ export function GameDetailsModal({
         }
       } catch (error) {
         if (!cancelled) {
-          setMessage(`Failed to resolve download folder: ${error}`);
+          setMessage(t.gameDetails.messages.resolveDownloadFolderFailed(error));
         }
       }
     };
@@ -166,11 +212,11 @@ export function GameDetailsModal({
 
   const handleDownload = async () => {
     if (userProvidedGame || metadataOnlyGame) {
-      setMessage('Import your local game file from this setup panel.');
+      setMessage(t.gameDetails.messages.importLocalGame);
       return;
     }
     if (!downloadableSource) {
-      setMessage('No automatic download source is available for this game.');
+      setMessage(t.gameDetails.messages.noAutomaticSource);
       return;
     }
 
@@ -182,10 +228,10 @@ export function GameDetailsModal({
     try {
       const result = await orchestrator.install();
       if (result.status === 'ready') {
-        setMessage('Installation complete. Ready to play.');
+        setMessage(t.gameDetails.messages.installComplete);
       } else {
         setShowSetupDetails(true);
-        setMessage(result.message ?? result.errorCode ?? 'Installation needs attention.');
+        setMessage(result.message ?? result.errorCode ?? t.gameDetails.messages.installNeedsAttention);
       }
       await download.refresh();
       await loadRequirements();
@@ -199,25 +245,25 @@ export function GameDetailsModal({
   const handleImportGame = async () => {
     const importPath = isTauriRuntime()
       ? await open({
-        title: `Import ${game.title}`,
+        title: `${t.common.import} ${game.title}`,
         multiple: false,
         directory: false
       })
-      : `F:\\RetroHydra\\Fixtures\\${game.id}${game.expectedExtensions[0] ?? '.rom'}`;
+      : `F:\\Fusion\\Fixtures\\${game.id}${game.expectedExtensions[0] ?? '.rom'}`;
     if (typeof importPath !== 'string') return;
 
     await runDownloadAction('import-game', async () => {
       const report = await api.importGameFile(game.id, importPath);
       if (report.status === 'error') {
-        throw new Error(`Import failed: ${report.errorCode ?? 'error'}`);
+        throw new Error(t.gameDetails.messages.importFailed(report.errorCode));
       }
-      setMessage(report.status === 'already_installed' ? 'Game file is already installed.' : 'Game file imported.');
+      setMessage(report.status === 'already_installed' ? t.gameDetails.messages.gameAlreadyInstalled : t.gameDetails.messages.gameImported);
     });
   };
 
   const handleImportAsset = async (item: RequirementItem) => {
     if (!isTauriRuntime()) {
-      setMessage('File import is available in the desktop build.');
+      setMessage(t.gameDetails.messages.assetImportDesktopOnly);
       return;
     }
 
@@ -225,7 +271,7 @@ export function GameDetailsModal({
     setMessage(null);
     try {
       const selected = await open({
-        title: `Import ${item.asset.displayName}`,
+        title: `${t.common.import} ${item.asset.displayName}`,
         multiple: false,
         directory: false
       });
@@ -233,9 +279,9 @@ export function GameDetailsModal({
 
       const report = await api.importAssetFile(item.asset.id, selected);
       if (report.status === 'error') {
-        setMessage(`Import failed: ${report.errorCode ?? 'error'}`);
+        setMessage(t.gameDetails.messages.importFailed(report.errorCode));
       } else {
-        setMessage(report.status === 'already_installed' ? 'File is already installed.' : 'File imported.');
+        setMessage(report.status === 'already_installed' ? t.gameDetails.messages.assetAlreadyInstalled : t.gameDetails.messages.assetImported);
       }
       await loadRequirements();
       await onRefresh();
@@ -261,12 +307,12 @@ export function GameDetailsModal({
     }
     const selected = isTauriRuntime()
       ? await open({
-        title: `Select ${setupState.emulator.emulatorName}`,
+        title: `${t.common.select} ${setupState.emulator.emulatorName}`,
         multiple: false,
         directory: false,
-        filters: [{ name: 'Executable', extensions: ['exe'] }]
+        filters: [{ name: t.gameDetails.selectExecutable, extensions: ['exe'] }]
       })
-      : `F:\\RetroHydra\\Emulators\\${setupState.profileId}.exe`;
+      : `F:\\Fusion\\Emulators\\${setupState.profileId}.exe`;
     if (typeof selected !== 'string') return;
     await run('profile-emulator', () => api.selectProfileEmulator(setupState.profileId ?? '', selected));
   };
@@ -275,28 +321,70 @@ export function GameDetailsModal({
     if (!setupState?.profileId) return;
     const selected = isTauriRuntime()
       ? await open({
-        title: `Import ${item.label}`,
+        title: `${t.common.import} ${item.label}`,
         multiple: false,
         directory: false,
         filters: item.expectedExtensions.length > 0
           ? [{ name: item.label, extensions: item.expectedExtensions.map((extension) => extension.replace(/^\./, '')) }]
           : undefined
       })
-      : `F:\\RetroHydra\\System\\${item.id}${item.expectedExtensions[0] ?? '.bin'}`;
+      : `F:\\Fusion\\System\\${item.id}${item.expectedExtensions[0] ?? '.bin'}`;
     if (typeof selected !== 'string') return;
     await run(`profile-file:${item.id}`, async () => {
       const report = await api.importProfileSystemFile(game.id, item.id, selected);
       if (report.status === 'error') {
-        throw new Error(`Import failed: ${report.errorCode ?? 'error'}`);
+        throw new Error(t.gameDetails.messages.importFailed(report.errorCode));
       }
-      setMessage(report.status === 'already_installed' ? 'System file is already installed.' : 'System file imported.');
+      setMessage(report.status === 'already_installed' ? t.gameDetails.messages.systemFileAlreadyInstalled : t.gameDetails.messages.systemFileImported);
     });
+  };
+
+  const handleRescrape = async () => {
+    setBusy('metadata');
+    setMessage(null);
+    try {
+      await api.scrapeGame(game.id);
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      await loadScrapeState();
+      setBusy(null);
+    }
+  };
+
+  const handleApplyCandidate = async (candidate: ScrapeCandidate) => {
+    setBusy(`metadata:${candidate.providerGameId}`);
+    setMessage(null);
+    try {
+      await api.applyScrapeOverride(game.id, candidate.providerGameId);
+      await loadScrapeState();
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleClearMetadataOverride = async () => {
+    setBusy('metadata-clear');
+    setMessage(null);
+    try {
+      await api.clearScrapeOverride(game.id);
+      await loadScrapeState();
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handlePlay = async () => {
     const saveDir = download.saveDir ?? defaultSaveDir;
     if (!saveDir) {
-      setMessage('Downloaded game folder is not ready.');
+      setMessage(t.gameDetails.messages.downloadFolderNotReady);
       return;
     }
 
@@ -305,7 +393,7 @@ export function GameDetailsModal({
     setLaunchFailure(null);
     try {
       await api.launchGame(game.id);
-      setMessage('Launch request sent.');
+      setMessage(t.gameDetails.messages.launchSent);
     } catch (error) {
       setLaunchFailure(normalizeLaunchFailure(error, game));
     } finally {
@@ -323,30 +411,30 @@ export function GameDetailsModal({
   const launchReady = setupState ? setupState.launch.status === 'ready' : Boolean(requirements?.ready);
   const canPlay = gameFileReady && launchReady && Boolean(saveDir) && busy === null;
   const downloadTitle = download.isLoading
-    ? 'Checking download'
+    ? t.gameDetails.downloadTitles.checking
     : status
-      ? DOWNLOAD_TITLES[status]
-      : 'Download';
+      ? t.gameDetails.downloadTitles[status]
+      : t.gameDetails.downloadTitles.idle;
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/72 px-5">
-      <section data-testid="game-details-modal" className="relative max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-white/12 bg-[#141417] shadow-2xl">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/78 px-5 backdrop-blur-xl">
+      <section data-testid="game-details-modal" className="relative max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/12 bg-fusion-surface/95 shadow-[0_40px_120px_rgba(0,0,0,0.72)]">
         <header className="flex items-start gap-4 border-b border-white/10 p-5">
           <div className="min-w-0 flex-1">
-            <h2 className="text-2xl font-black">{game.title}</h2>
-            <div className="mt-1 text-sm text-white/46">{game.platform} / {game.repositoryName}</div>
+            <h2 className="text-2xl font-bold">{displayProductText(game.title)}</h2>
+            <div className="mt-1 text-sm text-white/46">{game.platform} / {displayProductText(game.repositoryName)}</div>
           </div>
           <button
             onClick={onClose}
-            className="grid h-9 w-9 place-items-center rounded-md border border-white/10 text-white/60 transition hover:text-white"
-            title="Close"
+            className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 text-white/60 transition hover:border-hydra-accent/40 hover:bg-hydra-accent/10 hover:text-white"
+            title={t.gameDetails.closeTitle}
           >
             <X className="h-4 w-4" />
           </button>
         </header>
 
         <div className="grid grid-cols-[210px_1fr] gap-5 p-5">
-          <div className="overflow-hidden rounded-lg border border-white/10 bg-[#1a1a20]">
+          <div className="overflow-hidden rounded-2xl border border-white/10 bg-fusion-raised">
             <div className="aspect-[3/4]">
               <GameArt game={game} className="h-full w-full" />
             </div>
@@ -354,7 +442,7 @@ export function GameDetailsModal({
 
           <div className="min-w-0">
             {game.description && (
-              <p className="mb-5 text-sm leading-6 text-white/66">{game.description}</p>
+              <p className="mb-5 text-sm leading-6 text-white/66">{displayProductText(game.description)}</p>
             )}
             {game.metadata && (
               <div className="mb-5 flex flex-wrap gap-2 text-[11px] font-bold uppercase text-white/50">
@@ -367,51 +455,59 @@ export function GameDetailsModal({
               </div>
             )}
 
+            <MetadataScrapePanel
+              state={scrapeState}
+              busy={busy}
+              onRescrape={handleRescrape}
+              onApplyCandidate={handleApplyCandidate}
+              onClearOverride={handleClearMetadataOverride}
+            />
+
             {showSetupDetails && (
               <>
             <div className="mb-5 grid gap-2" data-testid="setup-checklist">
               <SetupRow
-                label="Emulator"
+                label={t.gameDetails.setup.emulator}
                 detail={emulatorReady
                   ? setupState?.emulator.executablePath ?? emulatorPath
-                  : setupState?.emulator.message ?? `Configure ${game.platform.toUpperCase()} emulator`}
+                  : setupState?.emulator.message ?? t.gameDetails.setup.configureEmulator(game.platform.toUpperCase())}
                 ready={emulatorReady}
                 actionLabel={emulatorReady
                   ? undefined
                   : setupState?.emulator.installMode === 'downloadable'
-                    ? 'Install'
-                    : 'Select'}
+                    ? t.common.install
+                    : t.gameDetails.setup.choose}
                 onAction={setupState?.emulator.installMode === 'downloadable'
                   ? () => void handleInstallProfileEmulator()
                   : () => void handleSelectProfileEmulator()}
                 disabled={busy !== null || emulatorReady}
               />
               <SetupRow
-                label="System files"
+                label={t.gameDetails.setup.systemFiles}
                 detail={setupState
-                  ? `${setupState.systemFiles.filter((item) => item.required).length + setupState.repositoryRequirements.length} required file(s)`
-                  : requirements?.requirements.length ? `${requirements.requirements.length} required file(s)` : 'No extra files required'}
+                  ? t.gameDetails.setup.neededFiles(setupState.systemFiles.filter((item) => item.required).length + setupState.repositoryRequirements.length)
+                  : requirements?.requirements.length ? t.gameDetails.setup.neededFiles(requirements.requirements.length) : t.gameDetails.setup.noExtraFiles}
                 ready={systemFilesReady}
-                actionLabel="Re-check"
+                actionLabel={t.gameDetails.setup.check}
                 onAction={() => void loadRequirements()}
                 disabled={busy !== null}
               />
               <SetupRow
-                label="Game file"
+                label={t.gameDetails.setup.gameFile}
                 detail={gameFileReady
-                  ? setupState?.gameFile.installedPath ?? saveDir ?? 'Imported'
-                  : userProvidedGame ? 'Import your local game file' : 'Download required'}
+                  ? setupState?.gameFile.installedPath ?? saveDir ?? t.gameDetails.setup.imported
+                  : userProvidedGame ? t.gameDetails.setup.importGameFile : t.gameDetails.setup.needsDownload}
                 ready={gameFileReady}
-                actionLabel={gameFileReady ? undefined : userProvidedGame ? 'Import' : 'Download'}
+                actionLabel={gameFileReady ? undefined : userProvidedGame ? t.common.import : t.common.download}
                 onAction={userProvidedGame ? () => void handleImportGame() : () => void handleDownload()}
                 disabled={busy !== null || gameFileReady}
                 testId="setup-game-file-row"
               />
               <SetupRow
-                label="Launch"
-                detail={launchReady ? 'Ready' : setupState?.launch.blockers[0] ?? 'Complete setup steps first'}
+                label={t.gameDetails.setup.launch}
+                detail={launchReady ? t.common.ready : setupState?.launch.blockers[0] ?? t.gameDetails.setup.finishSetupFirst}
                 ready={launchReady}
-                actionLabel="Re-check"
+                actionLabel={t.gameDetails.setup.check}
                 onAction={() => void loadRequirements()}
                 disabled={busy !== null}
               />
@@ -423,7 +519,7 @@ export function GameDetailsModal({
                   <div className="min-w-0">
                     <div className="truncate font-semibold">{item.label}</div>
                     <div className="mt-1 truncate text-xs text-white/38">
-                      {item.assetKind} / {item.status === 'ready' ? item.installedPath ?? 'Ready' : item.message ?? 'Missing'}
+                      {assetKindLabel(item.assetKind, t)} / {item.status === 'ready' ? item.installedPath ?? t.common.ready : item.message ?? t.common.missing}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -437,7 +533,7 @@ export function GameDetailsModal({
                       disabled={busy !== null || item.status === 'ready'}
                       className="h-8 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
                     >
-                      {busy === `profile-file:${item.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Import'}
+                      {busy === `profile-file:${item.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t.common.import}
                     </button>
                   </div>
                 </div>
@@ -447,7 +543,7 @@ export function GameDetailsModal({
                   <div className="min-w-0">
                     <div className="truncate font-semibold">{item.asset.displayName}</div>
                     <div className="mt-1 text-xs text-white/38">
-                      {item.asset.assetKind} / {requirementStatusLabel(item.status)}
+                      {item.asset.assetKind} / {requirementStatusLabel(item.status, t)}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -473,15 +569,15 @@ export function GameDetailsModal({
                     >
                       {busy === `asset:${item.asset.id}` ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : isUserProvidedRequirement(item) ? 'Import' : item.status === 'corrupt' || item.status === 'error' ? 'Retry' : 'Download'}
+                      ) : isUserProvidedRequirement(item) ? t.common.import : item.status === 'corrupt' || item.status === 'error' ? t.common.retry : t.common.download}
                     </button>
                     {item.asset.executable && item.downloaded && !item.trusted && (
                       <button
                         onClick={() => run(`trust:${item.asset.id}`, () => api.trustExecutable(item.asset.id))}
                         disabled={busy !== null}
-                        className="h-8 rounded-md bg-hydra-accent px-3 text-xs font-bold text-white transition hover:bg-violet-500 disabled:opacity-40"
+                        className="h-8 rounded-lg bg-hydra-accent px-3 text-xs font-bold text-fusion-accentOn transition hover:bg-fusion-accentHover disabled:opacity-40"
                       >
-                        Trust
+                        {t.gameDetails.setup.trust}
                       </button>
                     )}
                   </div>
@@ -513,7 +609,7 @@ export function GameDetailsModal({
                   <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-white/45">
                     <span>{formatBytes(download.downloadedBytes)} / {formatBytes(download.totalBytes)}</span>
                     <span>{formatSpeed(download.downloadSpeedBytesPerSec)}</span>
-                    <span>{download.peersCount} peers</span>
+                    <span>{download.peersCount} {t.common.peers}</span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     {status === 'downloading' && (
@@ -523,7 +619,7 @@ export function GameDetailsModal({
                         className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
                       >
                         {busy === 'pause' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pause className="h-3.5 w-3.5" />}
-                        Pause
+                        {t.gameDetails.downloadActions.pause}
                       </button>
                     )}
                     {(status === 'paused' || status === 'interrupted' || status === 'error') && (
@@ -538,7 +634,7 @@ export function GameDetailsModal({
                         className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
                       >
                         {busy === (status === 'error' ? 'retry' : 'resume') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
-                        {status === 'error' ? 'Retry' : 'Resume'}
+                        {status === 'error' ? t.gameDetails.downloadActions.retry : t.gameDetails.downloadActions.resume}
                       </button>
                     )}
                     {(status === 'resolving' || status === 'downloading' || status === 'paused' || status === 'interrupted' || status === 'error') && (
@@ -548,7 +644,7 @@ export function GameDetailsModal({
                         className="inline-flex h-8 items-center gap-2 rounded-md border border-red-300/20 px-3 text-xs font-semibold text-red-100/80 transition hover:bg-red-300/10 disabled:opacity-40"
                       >
                         {busy === 'cancel' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ban className="h-3.5 w-3.5" />}
-                        Cancel
+                        {t.gameDetails.downloadActions.cancel}
                       </button>
                     )}
                   </div>
@@ -561,7 +657,7 @@ export function GameDetailsModal({
                   className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
                 >
                   {busy === 'import-game' ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  Import Game File
+                  {t.gameDetails.setup.importGameFile}
                 </button>
               ) : (
                 <button
@@ -570,7 +666,7 @@ export function GameDetailsModal({
                   className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
                 >
                   {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  {downloadableSource ? 'Install' : 'Manual Source'}
+                  {downloadableSource ? t.common.install : t.gameDetails.setup.manualSource}
                 </button>
               )}
 
@@ -581,24 +677,24 @@ export function GameDetailsModal({
                   className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
                 >
                   {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  Finish Setup
+                  {t.gameDetails.setup.finishSetup}
                 </button>
               )}
 
               <button
                 onClick={handlePlay}
                 disabled={!canPlay}
-                className="inline-flex h-10 items-center gap-2 rounded-md bg-hydra-accent px-4 text-sm font-bold text-white shadow-glow transition hover:bg-violet-500 disabled:opacity-40"
+                className="inline-flex h-10 items-center gap-2 rounded-lg bg-hydra-accent px-4 text-sm font-bold text-fusion-accentOn shadow-glow transition hover:bg-fusion-accentHover disabled:opacity-40"
               >
                 {busy === 'launch' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                Play
+                {t.gameDetails.setup.play}
               </button>
               <button
                 onClick={() => setShowSetupDetails((current) => !current)}
                 disabled={orchestrator.running}
                 className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-white/10 px-4 text-sm font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
               >
-                {showSetupDetails ? 'Hide Details' : 'Details'}
+                {showSetupDetails ? t.gameDetails.setup.hideDetails : t.gameDetails.setup.details}
               </button>
               {(download.canPlay || status === 'completed') && (
                 <button
@@ -606,20 +702,20 @@ export function GameDetailsModal({
                   disabled={busy !== null}
                   className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-white/10 px-4 text-sm font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
                 >
-                  Open game folder
+                  {t.gameDetails.setup.openFolder}
                 </button>
               )}
               {(download.canPlay || status === 'completed' || status === 'cancelled') && (
                 <button
                   onClick={() => {
-                    if (window.confirm(`Remove downloaded files for ${game.title}?`)) {
+                    if (window.confirm(t.gameDetails.messages.removeConfirm(displayProductText(game.title)))) {
                       void runDownloadAction('remove', () => api.removeGame(game.id, true));
                     }
                   }}
                   disabled={busy !== null}
                   className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-red-300/20 px-4 text-sm font-semibold text-red-100/80 transition hover:bg-red-300/10 disabled:opacity-40"
                 >
-                  Remove files
+                  {t.gameDetails.setup.deleteFiles}
                 </button>
               )}
             </div>
@@ -649,19 +745,27 @@ export function GameDetailsModal({
   );
 }
 
-function requirementStatusLabel(status: RequirementsReport['requirements'][number]['status']) {
+function requirementStatusLabel(status: RequirementsReport['requirements'][number]['status'], t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'ready':
-      return 'Ready';
+      return t.gameDetails.requirementStatus.ready;
     case 'corrupt':
-      return 'Corrupt';
+      return t.gameDetails.requirementStatus.corrupt;
     case 'blocked':
-      return 'Blocked';
+      return t.gameDetails.requirementStatus.blocked;
     case 'error':
-      return 'Error';
+      return t.gameDetails.requirementStatus.error;
     default:
-      return 'Missing';
+      return t.gameDetails.requirementStatus.missing;
   }
+}
+
+function assetKindLabel(kind: string, t: ReturnType<typeof useI18n>['t']) {
+  if (kind === 'keys') return t.gameDetails.assetKind.keys;
+  if (kind === 'firmware') return t.gameDetails.assetKind.firmware;
+  if (kind === 'bios') return t.gameDetails.assetKind.bios;
+  if (kind === 'runtime') return t.gameDetails.assetKind.runtime;
+  return kind;
 }
 
 function isUserProvidedRequirement(item: RequirementItem) {
@@ -670,6 +774,93 @@ function isUserProvidedRequirement(item: RequirementItem) {
 
 function isUserProvidedGame(game: CatalogGame) {
   return game.contentMode === 'user_provided' || game.downloads.some((source) => source.kind === 'user_provided');
+}
+
+function MetadataScrapePanel({
+  state,
+  busy,
+  onRescrape,
+  onApplyCandidate,
+  onClearOverride
+}: {
+  state: ScrapeState | null;
+  busy: string | null;
+  onRescrape: () => Promise<void>;
+  onApplyCandidate: (candidate: ScrapeCandidate) => Promise<void>;
+  onClearOverride: () => Promise<void>;
+}) {
+  const status = state?.status ?? 'pending';
+  const active = busy === 'metadata' || busy === 'metadata-clear' || busy?.startsWith('metadata:');
+
+  return (
+    <div className="mb-5 rounded-md border border-white/10 bg-white/[0.045] px-3 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-bold text-white/82">
+            <DatabaseZap className="h-4 w-4 text-hydra-accent" />
+            Metadata
+          </div>
+          <div className="mt-1 text-xs text-white/42">
+            {scrapeStatusLabel(status, state?.matchKind, state?.message)}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void onRescrape()}
+          disabled={active}
+          className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+        >
+          {busy === 'metadata' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <DatabaseZap className="h-3.5 w-3.5" />}
+          Re-scrape
+        </button>
+        {state?.matchKind === 'override' && (
+          <button
+            type="button"
+            onClick={() => void onClearOverride()}
+            disabled={active}
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+          >
+            {busy === 'metadata-clear' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Clear override
+          </button>
+        )}
+      </div>
+
+      {state?.status === 'ambiguous' && state.candidates.length > 0 && (
+        <div className="mt-3 grid gap-2">
+          {state.candidates.map((candidate) => (
+            <div key={candidate.providerGameId} className="flex items-center justify-between gap-3 rounded-md bg-black/22 px-3 py-2 text-xs">
+              <div className="min-w-0">
+                <div className="truncate font-bold text-white/80">{candidate.title}</div>
+                <div className="mt-1 truncate text-white/38">
+                  {[candidate.releaseYear, candidate.developer, candidate.platform].filter(Boolean).join(' / ') || candidate.provider}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void onApplyCandidate(candidate)}
+                disabled={active}
+                className="h-8 shrink-0 rounded-md border border-white/10 px-3 text-xs font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+              >
+                {busy === `metadata:${candidate.providerGameId}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Apply'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function scrapeStatusLabel(status: ScrapeState['status'], matchKind?: string | null, message?: string | null) {
+  if (message) return message;
+  if (status === 'ready') return matchKind === 'hash' ? 'Matched by ROM hash.' : matchKind === 'override' ? 'Manual metadata override is active.' : 'Matched by game name.';
+  if (status === 'hashing') return 'Hashing local ROM.';
+  if (status === 'fetching') return 'Fetching metadata.';
+  if (status === 'ambiguous') return 'Choose the correct ScreenScraper match.';
+  if (status === 'failed') return 'Metadata lookup failed.';
+  if (status === 'skipped') return 'Metadata lookup is skipped.';
+  return 'Metadata has not been fetched yet.';
 }
 
 function SetupRow({

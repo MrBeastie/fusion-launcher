@@ -1,4 +1,5 @@
 import { getEmulatorConfig, getEmulatorPath, type AppSettings } from './settings.ts';
+import { getUiText } from './i18n.ts';
 import { PLATFORM_LABELS } from '../types/platform.ts';
 import type {
   CatalogGame,
@@ -58,10 +59,11 @@ export function buildGameLibraryItem(
   const missingRequirements = installed ? [...(backendStatus?.missingRequirements ?? [])] : [];
 
   if (installed && !emulatorConfigured) {
+    const text = getUiText(settings.language).gameDetails.setup;
     missingRequirements.push(
       emulatorPath
-        ? `Re-select ${PLATFORM_LABELS[game.platform]} emulator`
-        : `Configure ${PLATFORM_LABELS[game.platform]} emulator`
+        ? text.chooseEmulatorAgain(PLATFORM_LABELS[game.platform])
+        : text.configureEmulator(PLATFORM_LABELS[game.platform])
     );
   }
 

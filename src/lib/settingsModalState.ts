@@ -1,5 +1,6 @@
 import { getEmulatorConfig, getEmulatorPath, setEmulatorPath, type AppSettings } from './settings.ts';
 import { MVP_PLATFORMS, type MvpPlatform } from '../types/platform.ts';
+import { DEFAULT_LOCALE, getUiText, type Locale } from './i18n.ts';
 
 export type EmulatorSaveIntent = 'unchanged' | 'save' | 'delete';
 export type EmulatorDraftTone = 'empty' | 'unsaved' | 'valid' | 'missing' | 'invalid';
@@ -34,72 +35,74 @@ export function getEmulatorSaveIntent(
 export function getEmulatorDraftState(
   draftSettings: AppSettings,
   savedSettings: AppSettings,
-  platform: MvpPlatform
+  platform: MvpPlatform,
+  locale: Locale = DEFAULT_LOCALE
 ): EmulatorDraftState {
+  const text = getUiText(locale).settings.emulatorDraft;
   const draftPath = getEmulatorPath(draftSettings, platform);
   const savedPath = getEmulatorPath(savedSettings, platform);
   const saveIntent = getEmulatorSaveIntent(draftSettings, savedSettings, platform);
 
   if (!draftPath && savedPath) {
     return {
-      label: 'Remove on save',
+      label: text.removeOnSave.label,
       tone: 'unsaved',
       saveIntent,
-      detail: 'This platform path will be cleared when changes are saved.'
+      detail: text.removeOnSave.detail
     };
   }
 
   if (!draftPath) {
     return {
-      label: 'Not set',
+      label: text.notSet.label,
       tone: 'empty',
       saveIntent,
-      detail: 'Select an executable before launching this platform.'
+      detail: text.notSet.detail
     };
   }
 
   if (draftPath !== savedPath) {
     return {
-      label: 'Unsaved',
+      label: text.unsaved.label,
       tone: 'unsaved',
       saveIntent,
-      detail: 'Selected locally. Save changes to validate and persist it.'
+      detail: text.unsaved.detail
     };
   }
 
   const savedConfig = getEmulatorConfig(savedSettings, platform);
   if (savedConfig?.status === 'valid') {
     return {
-      label: 'Ready',
+      label: text.ready.label,
       tone: 'valid',
       saveIntent,
-      detail: 'Executable is saved and available.'
+      detail: text.ready.detail
     };
   }
 
   if (savedConfig?.status === 'missing') {
     return {
-      label: 'File moved',
+      label: text.fileMoved.label,
       tone: 'missing',
       saveIntent,
-      detail: 'The saved executable can no longer be found.'
+      detail: text.fileMoved.detail
     };
   }
 
   if (savedConfig?.status === 'invalid') {
     return {
-      label: 'Invalid',
+      label: text.invalid.label,
       tone: 'invalid',
       saveIntent,
-      detail: 'The saved executable failed validation.'
+      detail: text.invalid.detail
     };
   }
 
   return {
-    label: 'Saved',
+    label: text.saved.label,
     tone: 'valid',
     saveIntent,
-    detail: 'Executable path is saved.'
+    detail: text.saved.detail
   };
 }
 

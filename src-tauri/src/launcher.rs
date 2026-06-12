@@ -168,24 +168,26 @@ pub fn launch_game(
             )));
         }
 
-        let legacy_config = store
-            .get_emulator_config(&game.platform)
-            .map_err(LaunchFailure::spawn_failed)?;
-        let profile_config = if let Some(profile) = profile.as_ref() {
-            store
-                .get_profile_emulator_config(&profile.id)
-                .map_err(LaunchFailure::spawn_failed)?
-        } else {
-            None
-        };
-        let emulator_path = profile_config
-            .as_ref()
-            .and_then(|config| config.exe_path.as_deref())
-            .or_else(|| {
-                legacy_config
-                    .as_ref()
-                    .and_then(|config| config.exe_path.as_deref())
-            })
+        let (emulator_config_path, emulator_config_launch_args) =
+            if let Some(profile) = profile.as_ref() {
+                let config = store
+                    .get_profile_emulator_config(&profile.id)
+                    .map_err(LaunchFailure::spawn_failed)?;
+                (
+                    config.as_ref().and_then(|config| config.exe_path.clone()),
+                    config.and_then(|config| config.launch_args_template),
+                )
+            } else {
+                let config = store
+                    .get_emulator_config(&game.platform)
+                    .map_err(LaunchFailure::spawn_failed)?;
+                (
+                    config.as_ref().and_then(|config| config.exe_path.clone()),
+                    config.and_then(|config| config.launch_args_template),
+                )
+            };
+        let emulator_path = emulator_config_path
+            .as_deref()
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| LaunchFailure::emulator_not_configured(&game.platform))?
@@ -260,16 +262,7 @@ pub fn launch_game(
                     .as_ref()
                     .map(|profile| profile.launch.args_template.clone())
             })
-            .or_else(|| {
-                profile_config
-                    .as_ref()
-                    .and_then(|config| config.launch_args_template.clone())
-            })
-            .or_else(|| {
-                legacy_config
-                    .as_ref()
-                    .and_then(|config| config.launch_args_template.clone())
-            })
+            .or(emulator_config_launch_args)
             .filter(|template| !template.trim().is_empty())
             .unwrap_or_else(|| "{game_path}".to_string());
 

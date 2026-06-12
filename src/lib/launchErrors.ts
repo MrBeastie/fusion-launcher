@@ -1,4 +1,5 @@
 import type { CatalogGame, LaunchFailure } from '@/types/repository';
+import { DEFAULT_LOCALE, getUiText, type Locale } from './i18n.ts';
 
 export interface LaunchFailureView {
   title: string;
@@ -10,7 +11,7 @@ export interface LaunchFailureView {
 const FALLBACK_FAILURE: LaunchFailure = {
   kind: 'SpawnFailed',
   assets: [],
-  message: 'Failed to launch the emulator.'
+  message: getUiText(DEFAULT_LOCALE).launchErrors.fallbackMessage
 };
 
 export function normalizeLaunchFailure(error: unknown, game?: CatalogGame): LaunchFailure {
@@ -40,72 +41,71 @@ export function normalizeLaunchFailure(error: unknown, game?: CatalogGame): Laun
   };
 }
 
-export function launchFailureView(failure: LaunchFailure): LaunchFailureView {
+export function launchFailureView(failure: LaunchFailure, locale: Locale = DEFAULT_LOCALE): LaunchFailureView {
+  const text = getUiText(locale).launchErrors;
   switch (failure.kind) {
     case 'EmulatorNotConfigured':
       return {
-        title: 'Emulator not set up',
-        message: 'Point RetroHydra to the emulator executable before launching this platform.',
-        actionLabel: 'Open Settings',
+        title: text.emulatorNotConfigured.title,
+        message: text.emulatorNotConfigured.message,
+        actionLabel: text.emulatorNotConfigured.action,
         actionKind: 'settings'
       };
     case 'EmulatorFileMissing':
       return {
-        title: 'Emulator file not found',
-        message: failure.path
-          ? `The configured emulator executable is missing: ${failure.path}`
-          : 'The configured emulator executable is missing.',
-        actionLabel: 'Re-select executable',
+        title: text.emulatorFileMissing.title,
+        message: text.emulatorFileMissing.message(failure.path),
+        actionLabel: text.emulatorFileMissing.action,
         actionKind: 'settings'
       };
     case 'GameFileMissing':
       return {
-        title: 'Game file missing',
-        message: failure.message ?? 'The downloaded game file was moved or deleted.',
-        actionLabel: 'Re-download',
+        title: text.gameFileMissing.title,
+        message: failure.message ?? text.gameFileMissing.message,
+        actionLabel: text.gameFileMissing.action,
         actionKind: 'retry-download'
       };
     case 'GameFileCorrupt':
       return {
-        title: 'Game file is not playable',
-        message: failure.message ?? 'The downloaded game file failed validation.',
-        actionLabel: 'Re-download',
+        title: text.gameFileCorrupt.title,
+        message: failure.message ?? text.gameFileCorrupt.message,
+        actionLabel: text.gameFileCorrupt.action,
         actionKind: 'retry-download'
       };
     case 'SystemFilesMissing':
       return {
-        title: 'System files required',
-        message: missingAssetsMessage('Missing', failure.assets),
-        actionLabel: 'Open Details',
+        title: text.systemFilesMissing.title,
+        message: missingAssetsMessage(text.systemFilesMissing.prefix, text.systemFilesMissing.empty, failure.assets),
+        actionLabel: text.systemFilesMissing.action,
         actionKind: 'details'
       };
     case 'SystemFileCorrupt':
       return {
-        title: 'System file verification failed',
-        message: missingAssetsMessage('Corrupt', failure.assets),
-        actionLabel: 'Open Details',
+        title: text.systemFileCorrupt.title,
+        message: missingAssetsMessage(text.systemFileCorrupt.prefix, text.systemFileCorrupt.empty, failure.assets),
+        actionLabel: text.systemFileCorrupt.action,
         actionKind: 'details'
       };
     case 'AlreadyRunning':
       return {
-        title: 'Game already running',
-        message: 'RetroHydra already has a running emulator process for this game.',
-        actionLabel: 'Close',
+        title: text.alreadyRunning.title,
+        message: text.alreadyRunning.message,
+        actionLabel: text.alreadyRunning.action,
         actionKind: 'close'
       };
     default:
       return {
-        title: 'Launch failed',
-        message: failure.message ?? 'The emulator could not be started.',
-        actionLabel: 'Close',
+        title: text.spawnFailed.title,
+        message: failure.message ?? text.spawnFailed.message,
+        actionLabel: text.spawnFailed.action,
         actionKind: 'close'
       };
   }
 }
 
-function missingAssetsMessage(prefix: string, assets: string[]) {
+function missingAssetsMessage(prefix: string, emptyMessage: string, assets: string[]) {
   if (assets.length === 0) {
-    return `${prefix} system files are required before launch.`;
+    return `${prefix}: ${emptyMessage}`;
   }
 
   return `${prefix}: ${assets.join(', ')}`;

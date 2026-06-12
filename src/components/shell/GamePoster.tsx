@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Download, Play, RotateCw, ShieldAlert } from 'lucide-react';
+import { useI18n } from '../I18nProvider';
+import { displayProductText } from '../../lib/brandText.ts';
 import { createGameArt } from '../../lib/gameArt.ts';
 import { PLATFORM_LABELS } from '../../types/platform.ts';
 import type { GameLibraryItem, PrimaryGameAction } from '../../lib/libraryStatus.ts';
@@ -29,6 +31,7 @@ export function GamePoster({
   onAction,
   onFocus
 }: GamePosterProps) {
+  const { t } = useI18n();
   const ActionIcon = actionIconFor(item.primaryAction);
   const progressVisible = item.isDownloading || item.isPaused || item.hasError
     || (item.progressPercent > 0 && item.progressPercent < 100);
@@ -44,18 +47,20 @@ export function GamePoster({
         data-focus-zone={zone}
         onFocus={() => onFocus?.(focusId)}
         onClick={() => onOpen(item.game)}
-        className="rh-focusable relative block w-full overflow-hidden rounded-md text-left"
+        className="rh-focusable rh-card-button"
       >
-        <GameArt game={item.game} className={compact ? 'rh-compact-art' : 'aspect-[2/3]'} />
-        <div className={`rh-card-status rh-card-status-${item.statusTone}`}>{compact ? shortStatusLabel(item.statusLabel) : item.statusLabel}</div>
+        <GameArt game={item.game} className={compact ? 'rh-compact-art' : 'rh-card-art'} />
+        <div className={`rh-card-status rh-card-status-${item.statusTone}`}>
+          {compact ? shortStatusLabel(item.statusLabel, t) : displayStatusLabel(item.statusLabel, t)}
+        </div>
         {progressVisible && (
           <div className="rh-card-progress">
             <div style={{ width: `${item.readyToPlay ? 100 : item.progressPercent}%` }} />
           </div>
         )}
-        <div className={compact ? 'rh-compact-card-copy' : 'min-h-[48px] px-2.5 py-2'}>
-          <div className={`${compact ? 'text-[10px]' : 'text-[11px]'} line-clamp-2 font-black uppercase leading-tight text-white`}>{item.game.title}</div>
-          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] uppercase text-white/46">
+        <div className={compact ? 'rh-compact-card-copy' : 'rh-card-copy'}>
+          <div className={`${compact ? 'text-[11px]' : 'text-sm'} line-clamp-2 font-semibold leading-tight text-white`}>{displayProductText(item.game.title)}</div>
+          <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-white/46">
             <span>{item.game.platform}</span>
             {item.missingRequirements.length > 0 && <ShieldAlert className="h-3 w-3 text-amber-200" />}
           </div>
@@ -64,9 +69,9 @@ export function GamePoster({
       {onAction && (
         <button
           onClick={() => onAction(item)}
-          aria-label={item.primaryActionLabel}
-          className={`rh-card-action absolute right-2 grid h-7 w-7 place-items-center rounded-md bg-black/72 text-white opacity-0 backdrop-blur transition hover:bg-hydra-accent group-hover:opacity-100 ${compact ? 'bottom-[44px]' : 'bottom-[54px]'}`}
-          title={item.primaryActionLabel}
+          aria-label={displayActionLabel(item.primaryActionLabel, t)}
+          className="rh-card-action absolute right-2 grid h-7 w-7 place-items-center rounded-md bg-black/72 text-white opacity-0 backdrop-blur transition hover:bg-hydra-accent group-hover:opacity-100"
+          title={displayActionLabel(item.primaryActionLabel, t)}
         >
           <ActionIcon className="h-3.5 w-3.5" />
         </button>
@@ -82,12 +87,16 @@ function actionIconFor(action: PrimaryGameAction) {
   return Play;
 }
 
-function shortStatusLabel(label: string) {
-  if (label === 'Missing Requirements') return 'Missing';
-  if (label === 'Ready to Play') return 'Ready';
-  if (label === 'Not Installed') return 'New';
-  if (label === 'Resolving Magnet') return 'Resolving';
-  return label;
+function shortStatusLabel(label: string, t: ReturnType<typeof useI18n>['t']) {
+  return t.shortStatusLabels[label as keyof typeof t.shortStatusLabels] ?? displayStatusLabel(label, t);
+}
+
+function displayActionLabel(label: string, t: ReturnType<typeof useI18n>['t']) {
+  return t.actions[label as keyof typeof t.actions] ?? label;
+}
+
+function displayStatusLabel(label: string, t: ReturnType<typeof useI18n>['t']) {
+  return t.statusLabels[label as keyof typeof t.statusLabels] ?? label;
 }
 
 export function GameArt({
@@ -110,7 +119,7 @@ export function GameArt({
   }, [imageUrl]);
 
   return (
-    <div className={`relative overflow-hidden bg-[#111218] ${className}`}>
+    <div className={`relative overflow-hidden bg-fusion-raised ${className}`}>
       <div className="absolute inset-0" style={hero ? generated.heroStyle : generated.posterStyle}>
         <div className="absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.10),transparent_23%),linear-gradient(0deg,rgba(0,0,0,0.34),transparent_44%)]" />
         {hero ? (
@@ -120,9 +129,9 @@ export function GameArt({
           </div>
         ) : (
           <>
-            <div className="absolute inset-x-4 top-4 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.14em] text-white/56">
+            <div className="absolute inset-x-4 top-4 flex items-center justify-between text-[10px] font-semibold text-white/56">
               <span>{game.platform}</span>
-              <span>RH</span>
+              <span>fusion</span>
             </div>
             <div className="absolute inset-0 grid place-items-center">
               <div className="text-center">
@@ -135,7 +144,7 @@ export function GameArt({
       </div>
       {imageUrl && !imageFailed && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" onError={() => setImageFailed(true)} />
+        <img src={imageUrl} alt="" loading="lazy" decoding="async" className="absolute inset-0 h-full w-full object-cover" onError={() => setImageFailed(true)} />
       )}
     </div>
   );

@@ -17,16 +17,20 @@ import type {
   HealthReport,
   ImportAssetFileReport,
   ImportGameFileReport,
+  LibraryScrapeStatus,
   LibraryGameStatus,
   LaunchReport,
   OnboardingState,
   PlatformSetupProfile,
   ProfileEmulatorConfig,
-  RecommendedEmulator,
   RepairLibraryReport,
   RepositoryPreview,
   RepositorySummary,
   RequirementsReport,
+  ScrapeCandidate,
+  ScrapeState,
+  ScreenScraperStatus,
+  SteamGridDbStatus,
   TorrentDownloadRecord,
   TorrentStartReport,
   TorrentStatus,
@@ -50,6 +54,24 @@ const previewHandlers: Record<string, PreviewHandler> = {
   disconnect_repository: ({ repositoryId }) => previewApi.disconnectRepository(String(repositoryId ?? '')),
   get_catalog: () => previewApi.getCatalog(),
   get_game: ({ gameId }) => previewApi.getGame(String(gameId ?? '')),
+  scrape_game: ({ gameId }) => previewApi.scrapeGame(String(gameId ?? '')),
+  get_scrape_state: ({ gameId }) => previewApi.getScrapeState(String(gameId ?? '')),
+  list_scrape_candidates: ({ gameId }) => previewApi.listScrapeCandidates(String(gameId ?? '')),
+  apply_scrape_override: ({ gameId, providerGameId }) => previewApi.applyScrapeOverride(
+    String(gameId ?? ''),
+    String(providerGameId ?? '')
+  ),
+  clear_scrape_override: ({ gameId }) => previewApi.clearScrapeOverride(String(gameId ?? '')),
+  save_screenscraper_credentials: ({ ssid, sspassword, region }) => previewApi.saveScreenscraperCredentials(
+    String(ssid ?? ''),
+    String(sspassword ?? ''),
+    typeof region === 'string' ? region : undefined
+  ),
+  get_screenscraper_status: () => previewApi.getScreenscraperStatus(),
+  save_steamgriddb_key: ({ apiKey }) => previewApi.saveSteamgriddbKey(String(apiKey ?? '')),
+  get_steamgriddb_status: () => previewApi.getSteamgriddbStatus(),
+  scrape_library: () => previewApi.scrapeLibrary(),
+  cancel_library_scrape: () => previewApi.cancelLibraryScrape(),
   check_requirements: ({ gameId }) => previewApi.checkRequirements(String(gameId ?? '')),
   get_library_statuses: () => previewApi.getLibraryStatuses(),
   list_platform_setup_profiles: () => previewApi.listPlatformSetupProfiles(),
@@ -69,8 +91,6 @@ const previewHandlers: Record<string, PreviewHandler> = {
     String(sourcePath ?? '')
   ),
   list_emulator_configs: () => previewApi.listEmulatorConfigs(),
-  get_recommended_emulators: () => previewApi.getRecommendedEmulators(),
-  install_recommended_emulator: ({ platform }) => previewApi.installRecommendedEmulator(String(platform ?? '')),
   save_emulator_config: ({ platform, exePath, launchArgsTemplate }) => previewApi.saveEmulatorConfig(
     String(platform ?? ''),
     String(exePath ?? ''),
@@ -124,7 +144,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
       return handler(args ?? {}) as Promise<T>;
     }
 
-    return requireDesktopBridge('RetroHydra API');
+    return requireDesktopBridge('Fusion API');
   }
 
   return invoke<T>(command, args);
@@ -170,6 +190,39 @@ export const api = {
   getGame(gameId: string) {
     return call<CatalogGame | null>('get_game', { gameId });
   },
+  scrapeGame(gameId: string) {
+    return call<void>('scrape_game', { gameId });
+  },
+  getScrapeState(gameId: string) {
+    return call<ScrapeState>('get_scrape_state', { gameId });
+  },
+  listScrapeCandidates(gameId: string) {
+    return call<ScrapeCandidate[]>('list_scrape_candidates', { gameId });
+  },
+  applyScrapeOverride(gameId: string, providerGameId: string) {
+    return call<void>('apply_scrape_override', { gameId, providerGameId });
+  },
+  clearScrapeOverride(gameId: string) {
+    return call<boolean>('clear_scrape_override', { gameId });
+  },
+  saveScreenscraperCredentials(ssid: string, sspassword: string, region?: string) {
+    return call<ScreenScraperStatus>('save_screenscraper_credentials', { ssid, sspassword, region });
+  },
+  getScreenscraperStatus() {
+    return call<ScreenScraperStatus>('get_screenscraper_status');
+  },
+  saveSteamgriddbKey(apiKey: string) {
+    return call<SteamGridDbStatus>('save_steamgriddb_key', { apiKey });
+  },
+  getSteamgriddbStatus() {
+    return call<SteamGridDbStatus>('get_steamgriddb_status');
+  },
+  scrapeLibrary() {
+    return call<LibraryScrapeStatus>('scrape_library');
+  },
+  cancelLibraryScrape() {
+    return call<LibraryScrapeStatus>('cancel_library_scrape');
+  },
   checkRequirements(gameId: string) {
     return call<RequirementsReport>('check_requirements', { gameId });
   },
@@ -202,12 +255,6 @@ export const api = {
   },
   listEmulatorConfigs() {
     return call<EmulatorConfig[]>('list_emulator_configs');
-  },
-  getRecommendedEmulators() {
-    return call<RecommendedEmulator[]>('get_recommended_emulators');
-  },
-  installRecommendedEmulator(platform: string) {
-    return call<EmulatorConfig>('install_recommended_emulator', { platform });
   },
   saveEmulatorConfig(platform: string, exePath: string, launchArgsTemplate?: string) {
     return call<EmulatorConfig>('save_emulator_config', { platform, exePath, launchArgsTemplate });
