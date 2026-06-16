@@ -14,6 +14,7 @@ mod game_files;
 mod github_resolver;
 mod launcher;
 mod logging;
+mod manifest;
 mod orchestrator;
 mod rom_hasher;
 mod schema;
@@ -31,9 +32,24 @@ use torrent::TorrentManager;
 pub struct AppState {
     pub store: Arc<Mutex<RepositoryStore>>,
     pub data_dir: PathBuf,
-    pub torrents: TorrentManager,
+    /// `None` when the torrent engine failed to start this session (e.g. the
+    /// DHT UDP port was unavailable). Direct HTTP downloads keep working.
+    pub torrents: Option<TorrentManager>,
     pub running_games: Arc<Mutex<HashMap<String, u32>>>,
     pub library_scrape: scraper::LibraryScrapeRuntime,
+}
+
+impl AppState {
+    /// Returns the torrent engine, or a user-facing error if it could not be
+    /// initialized this session. Callers that need magnet/torrent support use
+    /// `state.torrents()?`; everything else stays unaffected.
+    pub fn torrents(&self) -> Result<&TorrentManager, String> {
+        self.torrents.as_ref().ok_or_else(|| {
+            "Torrent engine is unavailable for this session, so magnet downloads are disabled. \
+             Restart Fusion Launcher to try again."
+                .to_string()
+        })
+    }
 }
 
 pub fn run() {
@@ -73,14 +89,26 @@ pub fn run() {
                 }
             }
             let store = Arc::new(Mutex::new(repository_store));
-            let torrents = tauri::async_runtime::block_on(TorrentManager::new(
+            // Torrent startup is best-effort: a failure here (e.g. the DHT port
+            // is taken by another app) must not stop the launcher from opening.
+            // Direct HTTP downloads and the rest of the app work without it.
+            let torrents = match tauri::async_runtime::block_on(TorrentManager::new(
                 data_dir.join("Torrents"),
                 data_dir.join("torrent-session"),
                 data_dir.clone(),
                 Arc::clone(&store),
                 app.handle().clone(),
-            ))
-            .map_err(setup_error)?;
+            )) {
+                Ok(manager) => Some(manager),
+                Err(message) => {
+                    logging::log_event(
+                        &data_dir,
+                        "torrent_init_failed",
+                        &[("message", message.as_str())],
+                    );
+                    None
+                }
+            };
 
             app.manage(AppState {
                 store,
@@ -122,6 +150,7 @@ pub fn run() {
             commands::list_platform_setup_profiles,
             commands::get_game_setup_state,
             commands::install_profile_emulator,
+            commands::remove_profile_emulator,
             commands::select_profile_emulator,
             commands::import_profile_system_file,
             commands::list_emulator_configs,
@@ -145,7 +174,9 @@ pub fn run() {
             commands::get_diagnostics_paths,
             commands::get_diagnostics_bundle,
             launcher::launch_game,
+            manifest::fetch_manifest,
             orchestrator::install_game,
+            orchestrator::install_game_from_manifest,
             orchestrator::install_emulator,
             orchestrator::get_emulator_status,
             orchestrator::get_emulator_install_status,

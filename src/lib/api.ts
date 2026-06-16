@@ -6,6 +6,7 @@ import type {
   EmulatorStatus,
   InstallResult
 } from '@/types/emulatorProfile';
+import type { Manifest } from '@/types/manifest';
 import type {
   CatalogGame,
   DiagnosticsBundle,
@@ -24,6 +25,7 @@ import type {
   OnboardingState,
   PlatformSetupProfile,
   ProfileEmulatorConfig,
+  ProfileEmulatorRemovalReport,
   RepairLibraryReport,
   RepositoryPreview,
   RepositorySummary,
@@ -82,10 +84,14 @@ const previewHandlers: Record<string, PreviewHandler> = {
   list_platform_setup_profiles: () => previewApi.listPlatformSetupProfiles(),
   get_game_setup_state: ({ gameId }) => previewApi.getGameSetupState(String(gameId ?? '')),
   install_game: ({ gameId }) => previewApi.installGame(String(gameId ?? '')),
+  fetch_manifest: () =>
+    Promise.reject(new Error('Manifest fetching is available in the desktop app.')),
+  install_game_from_manifest: ({ titleId }) => previewApi.installGame(String(titleId ?? '')),
   install_emulator: ({ platform }) => previewApi.installEmulator(String(platform ?? '')),
   get_emulator_status: ({ platform }) => previewApi.getEmulatorStatus(String(platform ?? '')),
   get_emulator_install_status: ({ platform }) => previewApi.getEmulatorStatus(String(platform ?? '')),
   install_profile_emulator: ({ profileId }) => previewApi.installProfileEmulator(String(profileId ?? '')),
+  remove_profile_emulator: ({ profileId }) => previewApi.removeProfileEmulator(String(profileId ?? '')),
   select_profile_emulator: ({ profileId, executablePath }) => previewApi.selectProfileEmulator(
     String(profileId ?? ''),
     String(executablePath ?? '')
@@ -246,6 +252,12 @@ export const api = {
   installGame(gameId: string) {
     return call<InstallResult>('install_game', { gameId });
   },
+  fetchManifest(url: string) {
+    return call<Manifest>('fetch_manifest', { url });
+  },
+  installGameFromManifest(url: string, titleId: string) {
+    return call<InstallResult>('install_game_from_manifest', { url, titleId });
+  },
   installEmulator(platform: string) {
     return call<EmulatorInstallResult>('install_emulator', { platform });
   },
@@ -254,6 +266,9 @@ export const api = {
   },
   installProfileEmulator(profileId: string) {
     return call<ProfileEmulatorConfig>('install_profile_emulator', { profileId });
+  },
+  removeProfileEmulator(profileId: string) {
+    return call<ProfileEmulatorRemovalReport>('remove_profile_emulator', { profileId });
   },
   selectProfileEmulator(profileId: string, executablePath: string) {
     return call<ProfileEmulatorConfig>('select_profile_emulator', { profileId, executablePath });

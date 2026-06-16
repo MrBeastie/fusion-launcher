@@ -460,7 +460,9 @@ fn expand_placeholders(arg: &str, emulator_path: &str, game_path: &str) -> Resul
                 })?;
                 let placeholder = &after_open[..close];
                 let replacement = match placeholder {
-                    "game_path" => game_path,
+                    // `rom_path` is an alias for `game_path` so manifests that
+                    // use the {rom_path} convention work without renaming.
+                    "game_path" | "rom_path" => game_path,
                     "emulator_path" => emulator_path,
                     _ => {
                         return Err(format!(
@@ -529,12 +531,24 @@ mod tests {
 
     #[test]
     fn unknown_placeholders_return_error() {
-        let error = parse_launch_args("emu", "game", "{rom_path}").unwrap_err();
+        let error = parse_launch_args("emu", "game", "{save_path}").unwrap_err();
 
         assert_eq!(
             error,
-            "Invalid launch arguments template: unknown placeholder {rom_path}"
+            "Invalid launch arguments template: unknown placeholder {save_path}"
         );
+    }
+
+    #[test]
+    fn rom_path_is_an_alias_for_game_path() {
+        let args = parse_launch_args(
+            "C:/Emulators/retro.exe",
+            "C:/Games/Sonic.bin",
+            "-f -g {rom_path}",
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["-f", "-g", "C:/Games/Sonic.bin"]);
     }
 
     #[test]

@@ -239,7 +239,7 @@ pub(crate) async fn start_game_download_internal(
                 .join(crate::downloads::safe_segment(&game.id));
             let save_dir_string = save_dir.to_string_lossy().to_string();
             let torrent = state
-                .torrents
+                .torrents()?
                 .start_magnet_download(game.id.clone(), uri.clone(), save_dir_string.clone())
                 .await?;
             logging::log_event(
@@ -252,7 +252,7 @@ pub(crate) async fn start_game_download_internal(
                 source_kind: "magnet".to_string(),
                 save_dir: torrent.save_dir.clone(),
                 record: None,
-                torrent: state.torrents.get_game_download(game_id)?,
+                torrent: state.torrents()?.get_game_download(game_id)?,
             })
         }
         SourceUri::Http { size_bytes, .. } | SourceUri::Bundled { size_bytes, .. } => {
@@ -437,7 +437,9 @@ pub async fn remove_game(
 
     if let Some(torrent) = download.1.as_ref() {
         if !matches!(torrent.status.as_str(), "completed" | "cancelled") {
-            let _ = state.torrents.cancel_download(game_id.clone()).await;
+            if let Ok(torrents) = state.torrents() {
+                let _ = torrents.cancel_download(game_id.clone()).await;
+            }
         }
     }
 

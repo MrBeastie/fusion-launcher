@@ -13,7 +13,9 @@ use crate::emulator_profiles::{
     InstallProgressEvent, InstallResult, VersionStrategy,
 };
 use crate::github_resolver::{resolve_github_latest, ResolvedAsset};
+use crate::manifest::Manifest;
 use crate::schema::SourceUri;
+use crate::security::validate_repository_url;
 use crate::storage::RepositoryStore;
 use crate::AppState;
 
@@ -43,13 +45,102 @@ pub async fn install_game(
     }
 }
 
+/// Fetch a manifest from `url`, import its catalog into the store, and install
+/// the game identified by `title_id` through the normal pipeline.
+///
+/// This is the manifest-driven entry point: the magnet ROM is handed to the
+/// torrent engine, the emulator is installed over HTTP (from the manifest's
+/// `core_bundle_url` when present, otherwise the platform profile), and on
+/// success the game reaches "Ready to play" so a later `launch_game` resolves
+/// the emulator `.exe` and the downloaded ROM.
+#[tauri::command]
+pub async fn install_game_from_manifest(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    title_id: String,
+) -> Result<InstallResult, String> {
+    let manifest = crate::manifest::fetch_manifest_inner(&url)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    match install_game_from_manifest_inner(&app, &state, &manifest, &url, &title_id).await {
+        Ok(result) => Ok(result),
+        Err(error) => Ok(InstallResult {
+            game_id: title_id,
+            status: "error".to_string(),
+            error_code: Some(error_code(&error)),
+            message: Some(error),
+        }),
+    }
+}
+
+/// Import a parsed [`Manifest`] into the store and install one of its games.
+/// Separated from the command so it can be unit-tested and reused with an
+/// already-fetched manifest.
+pub(crate) async fn install_game_from_manifest_inner(
+    app: &AppHandle,
+    state: &AppState,
+    manifest: &Manifest,
+    source_url: &str,
+    title_id: &str,
+) -> Result<InstallResult, String> {
+    if !manifest.games.iter().any(|game| game.title_id == title_id) {
+        return Err(format!("unknown_manifest_game:{title_id}"));
+    }
+
+    let schema = manifest.to_repository_schema();
+    let stored_game_id = crate::security::global_id(&schema.metadata.id, title_id);
+    {
+        let mut store = lock_store(state)?;
+        store.store_repository(source_url, &schema)?;
+    }
+
+    // If the manifest provides an explicit emulator URL, install it over HTTP
+    // first so the main install flow finds it cached. This applies to every
+    // platform, Switch included: under the "Empty Shell" model the manifest is
+    // the source of truth and there is no built-in gate.
+    if let Some(game) = manifest.games.iter().find(|game| game.title_id == title_id) {
+        if let Some(url) = game.assets.core_bundle_url.as_deref() {
+            let url = url.trim();
+            if !url.is_empty() {
+                install_emulator_internal(
+                    app,
+                    state,
+                    &game.platform,
+                    Some(EmulatorSourceOverride {
+                        url: url.to_string(),
+                        sha256: game.assets.core_bundle_sha256.clone(),
+                        executable: non_empty_executable(&game.launch_config.executable),
+                    }),
+                )
+                .await
+                .map_err(|error| format!("emulator_install_failed:{error}"))?;
+            }
+        }
+    }
+
+    install_game_inner(app, state, &stored_game_id).await
+}
+
+/// Optional emulator download source supplied by a manifest. When present it
+/// replaces the platform profile's resolved download URL (and its hash check).
+#[derive(Clone)]
+pub(crate) struct EmulatorSourceOverride {
+    pub url: String,
+    pub sha256: Option<String>,
+    /// Executable to locate after extraction. Required for platforms without a
+    /// bundled profile (Switch), ignored when a profile defines the executable.
+    pub executable: Option<String>,
+}
+
 #[tauri::command]
 pub async fn install_emulator(
     app: AppHandle,
     state: State<'_, AppState>,
     platform: String,
 ) -> Result<EmulatorInstallResult, String> {
-    install_emulator_internal(&app, &state, platform.trim()).await
+    install_emulator_internal(&app, &state, platform.trim(), None).await
 }
 
 #[tauri::command]
@@ -72,13 +163,27 @@ pub(crate) async fn install_emulator_internal(
     app: &AppHandle,
     state: &AppState,
     platform: &str,
+    source_override: Option<EmulatorSourceOverride>,
 ) -> Result<EmulatorInstallResult, String> {
-    if platform == "switch" {
-        return Err("switch_emulator_not_configured: Select a Switch emulator executable.".into());
+    match load_emulator_profile(platform)? {
+        Some(profile) => install_profile_emulator(app, state, profile, source_override).await,
+        // Platforms without a bundled emulator profile (e.g. Switch) are
+        // installed entirely from the manifest. Under the "Empty Shell" model
+        // the user-supplied manifest is the source of truth for the emulator
+        // URL and executable name; there is no built-in gate.
+        None => install_manifest_emulator(app, state, platform, source_override).await,
     }
-    let profile =
-        load_emulator_profile(platform)?.ok_or_else(|| format!("no_profile_for:{platform}"))?;
+}
 
+/// Install an emulator that has a bundled platform profile (PS1, SNES, …). A
+/// manifest `source_override` may replace the profile's resolved download URL
+/// and hash; otherwise the profile's version strategy is used.
+async fn install_profile_emulator(
+    app: &AppHandle,
+    state: &AppState,
+    profile: EmulatorProfile,
+    source_override: Option<EmulatorSourceOverride>,
+) -> Result<EmulatorInstallResult, String> {
     if let Some((exe_path, version)) = existing_emulator(state, &profile)? {
         return Ok(EmulatorInstallResult {
             profile_id: profile.id,
@@ -88,7 +193,20 @@ pub(crate) async fn install_emulator_internal(
         });
     }
 
-    let resolved = resolve_profile_asset(state, &profile).await?;
+    let resolved = match &source_override {
+        Some(source) => {
+            let url = validate_repository_url(&source.url, false)
+                .map_err(|error| format!("invalid_emulator_url:{error}"))?;
+            ResolvedAsset {
+                filename: file_name_from_url(url.as_str())
+                    .unwrap_or_else(|| format!("{}.zip", profile.id)),
+                url: url.to_string(),
+                size: 0,
+                version: "manifest".to_string(),
+            }
+        }
+        None => resolve_profile_asset(state, &profile).await?,
+    };
     if resolved.size > MAX_EMULATOR_ARCHIVE_BYTES {
         return Err(format!(
             "emulator_archive_too_large:{} is {} bytes",
@@ -103,33 +221,27 @@ pub(crate) async fn install_emulator_internal(
         &format!("Downloading {}...", profile.display_name),
         10,
     );
-    let archive_path = download_emulator_archive(state, &profile, &resolved).await?;
-    let install_root = state.data_dir.join("Emulators");
-    let install_dir = install_root.join(&profile.platform);
-    let staging_dir = install_root.join(format!(".installing-{}", profile.platform));
-    archive::reset_staging_dir(&install_root, &staging_dir)?;
+    // A manifest-supplied hash takes precedence over the profile's pinned hash.
+    let expected_sha256 = match source_override
+        .as_ref()
+        .and_then(|source| source.sha256.as_deref())
     {
-        // Archive extraction is synchronous and CPU/IO heavy; keep it off the
-        // async runtime worker so concurrent commands stay responsive.
-        let archive_path = archive_path.clone();
-        let staging_dir = staging_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            archive::extract_archive_safely(&archive_path, &staging_dir)
-        })
-        .await
-        .map_err(|error| format!("Emulator extraction task failed: {error}"))??;
-    }
-    let staged_exe = archive::resolve_executable(
-        &staging_dir,
+        Some(sha) => Some(sha),
+        None => match &profile.version_strategy {
+            VersionStrategy::Fixed { sha256, .. } => Some(sha256.as_str()),
+            VersionStrategy::GithubLatest { .. } => None,
+        },
+    };
+    let archive_path =
+        download_emulator_archive(state, &resolved, expected_sha256, &profile.display_name).await?;
+    let exe_path = extract_emulator_archive(
+        state,
+        &archive_path,
+        &profile.platform,
         &profile.exe_relative_path,
         &profile.display_name,
-    )?;
-    let relative_exe = staged_exe
-        .strip_prefix(&staging_dir)
-        .map_err(|_| "Installed emulator executable escaped the staging folder.".to_string())?
-        .to_path_buf();
-    archive::replace_directory(&install_root, &install_dir, &staging_dir)?;
-    let exe_path = install_dir.join(relative_exe);
+    )
+    .await?;
     persist_emulator(state, &profile, &resolved.version, &exe_path)?;
     let _ = fs::remove_file(archive_path);
 
@@ -139,6 +251,136 @@ pub(crate) async fn install_emulator_internal(
         version: resolved.version,
         from_cache: false,
     })
+}
+
+/// Install an emulator for a platform that has no bundled profile (Switch). The
+/// download URL, executable name, and optional hash all come from the manifest.
+/// The result is persisted under the platform's default setup profile
+/// (`switch-manual` for Switch) so the launcher resolves it like any other
+/// configured emulator.
+async fn install_manifest_emulator(
+    app: &AppHandle,
+    state: &AppState,
+    platform: &str,
+    source_override: Option<EmulatorSourceOverride>,
+) -> Result<EmulatorInstallResult, String> {
+    let source = source_override.ok_or_else(|| {
+        format!(
+            "emulator_source_missing:{platform} has no bundled emulator; the manifest must provide core_bundle_url."
+        )
+    })?;
+    let executable = source
+        .executable
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            format!("emulator_executable_unknown:{platform} manifest must set launch_config.executable.")
+        })?
+        .to_string();
+
+    let default_profile = crate::setup_profiles::get_default_platform_setup_profile(platform);
+    let profile_id = default_profile
+        .as_ref()
+        .map(|profile| profile.id.clone())
+        .unwrap_or_else(|| format!("{platform}-manifest"));
+    let display_name = default_profile
+        .as_ref()
+        .map(|profile| profile.emulator.emulator_name.clone())
+        .unwrap_or_else(|| format!("{platform} emulator"));
+
+    // Reuse an already-installed emulator (platform-level config).
+    {
+        let store = lock_store(state)?;
+        if let Some(path) = store.get_emulator_exe_path(platform, None)? {
+            let version = store
+                .get_emulator_config(platform)?
+                .and_then(|config| config.version)
+                .unwrap_or_else(|| "installed".to_string());
+            return Ok(EmulatorInstallResult {
+                profile_id,
+                exe_path: path.to_string_lossy().to_string(),
+                version,
+                from_cache: true,
+            });
+        }
+    }
+
+    let url = validate_repository_url(&source.url, false)
+        .map_err(|error| format!("invalid_emulator_url:{error}"))?;
+    let resolved = ResolvedAsset {
+        filename: file_name_from_url(url.as_str())
+            .unwrap_or_else(|| format!("{platform}-emulator.zip")),
+        url: url.to_string(),
+        size: 0,
+        version: "manifest".to_string(),
+    };
+
+    emit_progress(
+        app,
+        "",
+        "emulator",
+        &format!("Downloading {display_name}..."),
+        10,
+    );
+    let archive_path =
+        download_emulator_archive(state, &resolved, source.sha256.as_deref(), &display_name)
+            .await?;
+    let exe_path =
+        extract_emulator_archive(state, &archive_path, platform, &executable, &display_name)
+            .await?;
+
+    // Persist under the platform's default profile (e.g. switch-manual) so
+    // get_emulator_status_internal and launch_game both resolve it.
+    lock_store(state)?.upsert_emulator_config(
+        platform,
+        Some(&exe_path.to_string_lossy()),
+        "valid",
+        Some(&resolved.version),
+        None,
+    )?;
+    let _ = fs::remove_file(archive_path);
+
+    Ok(EmulatorInstallResult {
+        profile_id,
+        exe_path: exe_path.to_string_lossy().to_string(),
+        version: resolved.version,
+        from_cache: false,
+    })
+}
+
+/// Stage, extract, locate the executable, and atomically swap an emulator
+/// archive into `Emulators/<platform>`. Shared by the profile and manifest
+/// install paths. Returns the absolute path to the resolved executable.
+async fn extract_emulator_archive(
+    state: &AppState,
+    archive_path: &Path,
+    platform: &str,
+    exe_relative_path: &str,
+    display_name: &str,
+) -> Result<PathBuf, String> {
+    let install_root = state.data_dir.join("Emulators");
+    let install_dir = install_root.join(platform);
+    let staging_dir = install_root.join(format!(".installing-{platform}"));
+    archive::reset_staging_dir(&install_root, &staging_dir)?;
+    {
+        // Archive extraction is synchronous and CPU/IO heavy; keep it off the
+        // async runtime worker so concurrent commands stay responsive.
+        let archive_path = archive_path.to_path_buf();
+        let staging_dir = staging_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            archive::extract_archive_safely(&archive_path, &staging_dir)
+        })
+        .await
+        .map_err(|error| format!("Emulator extraction task failed: {error}"))??;
+    }
+    let staged_exe = archive::resolve_executable(&staging_dir, exe_relative_path, display_name)?;
+    let relative_exe = staged_exe
+        .strip_prefix(&staging_dir)
+        .map_err(|_| "Installed emulator executable escaped the staging folder.".to_string())?
+        .to_path_buf();
+    archive::replace_directory(&install_root, &install_dir, &staging_dir)?;
+    Ok(install_dir.join(relative_exe))
 }
 
 fn get_emulator_status_internal(
@@ -190,7 +432,7 @@ async fn install_game_inner(
             });
         }
     } else {
-        install_emulator_internal(app, state, &game.platform)
+        install_emulator_internal(app, state, &game.platform, None)
             .await
             .map_err(|error| format!("emulator_install_failed:{error}"))?;
     }
@@ -262,7 +504,7 @@ async fn wait_for_game_download(
     game_id: &str,
 ) -> Result<(), String> {
     loop {
-        let Some(download) = state.torrents.get_game_download(game_id)? else {
+        let Some(download) = state.torrents()?.get_game_download(game_id)? else {
             return Err(
                 "download_state_missing: Download did not create a persisted record.".into(),
             );
@@ -367,8 +609,9 @@ async fn resolve_profile_asset(
 
 async fn download_emulator_archive(
     state: &AppState,
-    profile: &EmulatorProfile,
     asset: &ResolvedAsset,
+    expected_sha256: Option<&str>,
+    display_name: &str,
 ) -> Result<PathBuf, String> {
     let temp_dir = state.data_dir.join("Temp").join("emulators");
     tokio::fs::create_dir_all(&temp_dir)
@@ -376,13 +619,9 @@ async fn download_emulator_archive(
         .map_err(|error| format!("Failed to create emulator temp folder: {error}"))?;
     let archive_path = temp_dir.join(crate::downloads::safe_segment(&asset.filename));
 
-    // Pinned (Fixed) profiles verify against a known hash; GithubLatest assets
-    // have no pinned hash, but we still verify the GitHub-reported size and cap
-    // the transfer so a hostile redirect can't stream an unbounded archive.
-    let expected_sha256 = match &profile.version_strategy {
-        VersionStrategy::Fixed { sha256, .. } => Some(sha256.as_str()),
-        VersionStrategy::GithubLatest { .. } => None,
-    };
+    // When a hash is known (pinned profile or manifest-supplied) it is verified;
+    // otherwise we still verify the reported size and cap the transfer so a
+    // hostile redirect can't stream an unbounded archive.
     let expected_size_bytes = (asset.size > 0).then_some(asset.size);
 
     crate::downloads::download_http_streaming(
@@ -397,7 +636,7 @@ async fn download_emulator_archive(
         |_, _| {},
     )
     .await
-    .map_err(|error| format!("Failed to download {}: {error}", profile.display_name))?;
+    .map_err(|error| format!("Failed to download {display_name}: {error}"))?;
 
     Ok(archive_path)
 }
@@ -420,6 +659,15 @@ fn persist_emulator(
         Some(&launch_args),
     )?;
     Ok(())
+}
+
+fn non_empty_executable(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn file_name_from_url(url: &str) -> Option<String> {

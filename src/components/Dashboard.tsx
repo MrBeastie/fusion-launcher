@@ -198,6 +198,14 @@ export function Dashboard({
     return savedSettings;
   };
 
+  const reloadSettings = async () => {
+    const nextSettings = await loadSettings();
+    setSettings(nextSettings);
+    setSettingsMessage(null);
+    await refreshLauncherData();
+    return nextSettings;
+  };
+
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     setBusyAction(label);
     setLauncherMessage(null);
@@ -693,12 +701,14 @@ export function Dashboard({
             sourcePreview={sourcePreview}
             onClose={() => setSettingsOpen(false)}
             onSave={persistSettings}
+            onReloadSettings={reloadSettings}
             onSourceUrlChange={updateSourceUrl}
             onPreviewRepositoryUrl={previewRepositoryUrl}
             onConnectRepositoryUrl={connectRepositoryUrl}
             onConnectRepositoryFile={connectRepositoryFile}
             onDisconnect={disconnect}
             onRefreshRepository={refreshRepository}
+            onManifestInstalled={refreshLauncherData}
             onRunHealth={runHealthCheck}
             onCopyDiagnostics={copyDiagnostics}
             onOpenLogs={openLogs}

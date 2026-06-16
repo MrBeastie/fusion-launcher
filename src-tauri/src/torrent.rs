@@ -621,7 +621,7 @@ pub async fn start_magnet_download(
     state: State<'_, AppState>,
 ) -> Result<TorrentStartReport, String> {
     state
-        .torrents
+        .torrents()?
         .start_magnet_download(game_id, magnet_uri, save_dir)
         .await
 }
@@ -631,7 +631,7 @@ pub async fn get_torrent_status(
     game_id: String,
     state: State<'_, AppState>,
 ) -> Result<TorrentStatus, String> {
-    state.torrents.get_torrent_status(game_id).await
+    state.torrents()?.get_torrent_status(game_id).await
 }
 
 #[tauri::command]
@@ -639,14 +639,14 @@ pub fn get_game_download(
     game_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<TorrentDownloadRecord>, String> {
-    state.torrents.get_game_download(&game_id)
+    state.torrents()?.get_game_download(&game_id)
 }
 
 #[tauri::command]
 pub fn list_torrent_downloads(
     state: State<'_, AppState>,
 ) -> Result<Vec<TorrentDownloadRecord>, String> {
-    state.torrents.list_downloads()
+    state.torrents()?.list_downloads()
 }
 
 #[tauri::command]
@@ -654,7 +654,7 @@ pub async fn pause_download(
     game_id: String,
     state: State<'_, AppState>,
 ) -> Result<TorrentDownloadRecord, String> {
-    state.torrents.pause_download(game_id).await
+    state.torrents()?.pause_download(game_id).await
 }
 
 #[tauri::command]
@@ -662,7 +662,7 @@ pub async fn resume_download(
     game_id: String,
     state: State<'_, AppState>,
 ) -> Result<TorrentDownloadRecord, String> {
-    state.torrents.resume_download(game_id).await
+    state.torrents()?.resume_download(game_id).await
 }
 
 #[tauri::command]
@@ -670,7 +670,7 @@ pub async fn cancel_download(
     game_id: String,
     state: State<'_, AppState>,
 ) -> Result<TorrentDownloadRecord, String> {
-    state.torrents.cancel_download(game_id).await
+    state.torrents()?.cancel_download(game_id).await
 }
 
 fn validate_start_request(game_id: &str, magnet_uri: &str, save_dir: &str) -> Result<(), String> {
@@ -691,6 +691,12 @@ fn conservative_session_options(persistence_folder: PathBuf) -> SessionOptions {
     SessionOptions {
         peer_opts: Some(conservative_peer_options()),
         listen_port_range: None,
+        // Don't persist the DHT's chosen UDP port. librqbit otherwise saves the
+        // exact port and tries to rebind it on next launch; if anything else has
+        // since grabbed it (e.g. MSI.CentralServer takes 51629), the bind fails
+        // and the whole app aborts in the setup hook. A fresh ephemeral port per
+        // start avoids that at the cost of re-bootstrapping DHT each launch.
+        disable_dht_persistence: true,
         enable_upnp_port_forwarding: false,
         concurrent_init_limit: Some(MAX_ACTIVE_DOWNLOADS),
         ratelimits: upload_ratelimits(SESSION_UPLOAD_LIMIT_BYTES_PER_SEC),
@@ -1142,6 +1148,7 @@ mod tests {
         assert_eq!(options.ratelimits.download_bps, None);
         assert_eq!(options.concurrent_init_limit, Some(MAX_ACTIVE_DOWNLOADS));
         assert_eq!(options.listen_port_range, None);
+        assert!(options.disable_dht_persistence);
         assert!(!options.enable_upnp_port_forwarding);
         assert!(options.fastresume);
         assert!(options.persistence.is_some());
