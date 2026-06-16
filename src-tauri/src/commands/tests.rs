@@ -242,6 +242,137 @@ fn open_store(required_asset_ids: Vec<String>) -> (tempfile::TempDir, Repository
 }
 
 #[test]
+fn removing_downloadable_profile_deletes_managed_folder_and_config() {
+    let (dir, store) = open_store(Vec::new());
+    let emulator_dir = dir.path().join("Emulators").join("nes");
+    let exe_path = emulator_dir.join("Mesen.exe");
+    std::fs::create_dir_all(&emulator_dir).unwrap();
+    std::fs::write(&exe_path, b"exe").unwrap();
+    let exe_path = exe_path.to_string_lossy().to_string();
+    store
+        .upsert_profile_emulator_config(
+            "nes-mesen",
+            "nes",
+            Some(&exe_path),
+            "valid",
+            Some("2.1.1"),
+            Some("{game_path}"),
+        )
+        .unwrap();
+
+    let report = remove_profile_emulator_from_store(&store, dir.path(), "nes-mesen").unwrap();
+
+    assert_eq!(report.profile_id, "nes-mesen");
+    assert_eq!(report.platform, "nes");
+    assert!(report.deleted_files);
+    assert!(report.removed_config);
+    assert!(!emulator_dir.exists());
+    assert!(store
+        .get_profile_emulator_config("nes-mesen")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn removing_downloadable_profile_handles_missing_managed_folder() {
+    let (dir, store) = open_store(Vec::new());
+    store
+        .upsert_profile_emulator_config(
+            "nes-mesen",
+            "nes",
+            Some("C:/Missing/Mesen.exe"),
+            "missing",
+            None,
+            Some("{game_path}"),
+        )
+        .unwrap();
+
+    let report = remove_profile_emulator_from_store(&store, dir.path(), "nes-mesen").unwrap();
+
+    assert!(!report.deleted_files);
+    assert!(report.removed_config);
+    assert!(store
+        .get_profile_emulator_config("nes-mesen")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn removing_manual_profile_only_forgets_external_path() {
+    let (dir, store) = open_store(Vec::new());
+    let external_dir = dir.path().join("External");
+    let external_exe = external_dir.join("eden.exe");
+    std::fs::create_dir_all(&external_dir).unwrap();
+    std::fs::write(&external_exe, b"exe").unwrap();
+    let external_exe = external_exe.to_string_lossy().to_string();
+    store
+        .upsert_profile_emulator_config(
+            "switch-manual",
+            "switch",
+            Some(&external_exe),
+            "valid",
+            None,
+            Some("{game_path}"),
+        )
+        .unwrap();
+
+    let report = remove_profile_emulator_from_store(&store, dir.path(), "switch-manual").unwrap();
+
+    assert!(!report.deleted_files);
+    assert!(report.removed_path.is_none());
+    assert!(Path::new(&external_exe).exists());
+    assert!(store
+        .get_profile_emulator_config("switch-manual")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn adopts_switch_keys_bundled_in_emulator_archive() {
+    let (dir, store) = open_store(Vec::new());
+    let profile = crate::setup_profiles::get_platform_setup_profile("switch-manual").unwrap();
+    let keys_req = profile
+        .system_files
+        .iter()
+        .find(|requirement| requirement.id == "switch-prod-keys")
+        .unwrap();
+
+    // Simulate an extracted emulator that ships prod.keys in a nested folder.
+    let search_dir = dir.path().join("Emulators").join("switch");
+    let nested = search_dir.join("keys");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("prod.keys"), b"AAAA").unwrap();
+
+    let adopted =
+        adopt_bundled_profile_system_files(&store, dir.path(), &profile, &search_dir).unwrap();
+    assert_eq!(adopted, vec!["switch-prod-keys".to_string()]);
+
+    let state = inspect_profile_system_file(&store, dir.path(), &profile, keys_req).unwrap();
+    assert_eq!(state.status, "ready");
+}
+
+#[test]
+fn leaves_switch_keys_unsatisfied_when_archive_lacks_them() {
+    let (dir, store) = open_store(Vec::new());
+    let profile = crate::setup_profiles::get_platform_setup_profile("switch-manual").unwrap();
+    let keys_req = profile
+        .system_files
+        .iter()
+        .find(|requirement| requirement.id == "switch-prod-keys")
+        .unwrap();
+
+    let search_dir = dir.path().join("Emulators").join("switch");
+    std::fs::create_dir_all(&search_dir).unwrap();
+
+    let adopted =
+        adopt_bundled_profile_system_files(&store, dir.path(), &profile, &search_dir).unwrap();
+    assert!(adopted.is_empty());
+
+    let state = inspect_profile_system_file(&store, dir.path(), &profile, keys_req).unwrap();
+    assert_eq!(state.status, "missing");
+}
+
+#[test]
 fn library_status_marks_installed_game_with_missing_system_file() {
     let (dir, store) = open_store(vec!["emu".to_string()]);
     let game = store.get_game("repo::game").unwrap().unwrap();

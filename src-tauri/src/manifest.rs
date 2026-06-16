@@ -37,27 +37,36 @@ pub struct Game {
     pub title_id: String,
     pub title: String,
     pub platform: String,
+    #[serde(default)]
     pub game_version: String,
+    #[serde(default)]
     pub visuals: Visuals,
     pub assets: Assets,
+    #[serde(default)]
     pub launch_config: LaunchConfig,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Visuals {
+    #[serde(default)]
     pub cover_url: String,
+    #[serde(default)]
     pub background_url: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Assets {
+    /// Magnet URI for the ROM download — the one genuinely required asset.
     pub heavy_rom_magnet: String,
-    pub core_bundle_p2p_hash: String,
-    pub shader_cache_url: String,
+    /// Manifests authored by users vary; every field below is optional so a
+    /// renamed or omitted key does not fail the whole parse ("Empty Shell").
+    #[serde(default)]
+    pub core_bundle_p2p_hash: Option<String>,
+    #[serde(default)]
+    pub shader_cache_url: Option<String>,
     /// Optional direct HTTPS link to the emulator (core) archive. When present,
     /// it overrides the bundled platform profile's download source so the
-    /// emulator is fetched from the manifest instead. Optional for backward
-    /// compatibility with manifests that omit it.
+    /// emulator is fetched from the manifest instead.
     #[serde(default)]
     pub core_bundle_url: Option<String>,
     /// Optional SHA-256 of the emulator archive for integrity verification.
@@ -65,11 +74,15 @@ pub struct Assets {
     pub core_bundle_sha256: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct LaunchConfig {
+    #[serde(default)]
     pub engine: String,
+    #[serde(default)]
     pub executable: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
     pub inject_mods: Vec<String>,
 }
 
@@ -335,8 +348,8 @@ mod tests {
                     "shader_cache_url": "https://example.com/shaders.zip"
                 },
                 "launch_config": {
-                    "engine": "suyu",
-                    "executable": "suyu-cmd.exe",
+                    "engine": "eden",
+                    "executable": "eden.exe",
                     "args": ["-f", "-g", "{rom_path}"],
                     "inject_mods": ["60fps_v3", "dynamic_fps"]
                 }
@@ -353,7 +366,7 @@ mod tests {
 
         let game = &manifest.games[0];
         assert_eq!(game.platform, "switch");
-        assert_eq!(game.launch_config.engine, "suyu");
+        assert_eq!(game.launch_config.engine, "eden");
         assert_eq!(game.launch_config.args, ["-f", "-g", "{rom_path}"]);
         assert_eq!(game.assets.heavy_rom_magnet, "magnet:?xt=urn:btih:abc");
     }
@@ -403,6 +416,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_manifest_without_optional_asset_fields() {
+        // Mirrors a user-edited manifest: no core_bundle_p2p_hash, no
+        // shader_cache_url, only the ROM magnet plus an emulator URL.
+        let json = r#"{
+            "manifest_version": "1.0",
+            "repository_name": "Underground Retro Archive",
+            "last_updated": "2026-06-16",
+            "games": [
+                {
+                    "title_id": "0100F2C0115B6000",
+                    "title": "Zelda",
+                    "platform": "switch",
+                    "assets": {
+                        "heavy_rom_magnet": "magnet:?xt=urn:btih:abc",
+                        "core_bundle_url": "https://example.com/eden.zip"
+                    },
+                    "launch_config": {
+                        "engine": "eden",
+                        "executable": "eden.exe",
+                        "args": ["-g", "{rom_path}"]
+                    }
+                }
+            ]
+        }"#;
+
+        let manifest: Manifest = serde_json::from_str(json).expect("tolerant manifest parses");
+        let game = &manifest.games[0];
+        assert!(game.assets.core_bundle_p2p_hash.is_none());
+        assert!(game.assets.shader_cache_url.is_none());
+        assert_eq!(
+            game.assets.core_bundle_url.as_deref(),
+            Some("https://example.com/eden.zip")
+        );
+        // Omitted visuals default cleanly.
+        assert!(game.visuals.cover_url.is_empty());
+
+        // And it still converts for the install pipeline.
+        let schema = manifest.to_repository_schema();
+        assert_eq!(schema.catalog.len(), 1);
+    }
+
+    #[test]
     fn emulator_url_is_optional_and_parses_when_present() {
         // Absent in the reference sample -> defaults to None.
         let manifest: Manifest = serde_json::from_str(SAMPLE).unwrap();
@@ -413,13 +468,13 @@ mod tests {
         let with_url = SAMPLE.replace(
             "\"shader_cache_url\": \"https://example.com/shaders.zip\"",
             "\"shader_cache_url\": \"https://example.com/shaders.zip\",\n\
-             \"core_bundle_url\": \"https://example.com/suyu.zip\",\n\
+             \"core_bundle_url\": \"https://example.com/eden.zip\",\n\
              \"core_bundle_sha256\": \"deadbeef\"",
         );
         let manifest: Manifest = serde_json::from_str(&with_url).unwrap();
         assert_eq!(
             manifest.games[0].assets.core_bundle_url.as_deref(),
-            Some("https://example.com/suyu.zip")
+            Some("https://example.com/eden.zip")
         );
         assert_eq!(
             manifest.games[0].assets.core_bundle_sha256.as_deref(),

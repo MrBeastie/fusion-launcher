@@ -116,6 +116,24 @@ pub(crate) async fn install_game_from_manifest_inner(
                 )
                 .await
                 .map_err(|error| format!("emulator_install_failed:{error}"))?;
+
+                // Keys/BIOS may ship inside the emulator archive (e.g. Switch
+                // prod.keys). Register any required system files found in the
+                // freshly-extracted emulator folder so the system-files check
+                // runs against what the bundle actually delivered, rather than
+                // blocking the install up front.
+                if let Some(profile) =
+                    crate::setup_profiles::get_default_platform_setup_profile(&game.platform)
+                {
+                    let install_dir = state.data_dir.join("Emulators").join(&game.platform);
+                    let store = lock_store(state)?;
+                    let _ = crate::commands::adopt_bundled_profile_system_files(
+                        &store,
+                        &state.data_dir,
+                        &profile,
+                        &install_dir,
+                    );
+                }
             }
         }
     }

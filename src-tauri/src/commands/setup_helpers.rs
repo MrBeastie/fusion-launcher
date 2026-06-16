@@ -346,6 +346,89 @@ pub(super) fn import_profile_system_file_into_store(
     }
 }
 
+/// Scan `search_dir` (a freshly-extracted emulator install) for files that
+/// satisfy the profile's required system files and register any found ones as
+/// imports. Used by the manifest install flow: an emulator delivered via
+/// `core_bundle_url` may ship its own keys/BIOS inside the archive, so those
+/// count as provided instead of forcing a separate manual import. Returns the
+/// requirement ids that were adopted.
+pub(crate) fn adopt_bundled_profile_system_files(
+    store: &RepositoryStore,
+    data_dir: &Path,
+    profile: &PlatformSetupProfile,
+    search_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let mut adopted = Vec::new();
+    if !search_dir.is_dir() {
+        return Ok(adopted);
+    }
+    for requirement in &profile.system_files {
+        if requirement.source_mode != "user_provided" {
+            continue;
+        }
+        // Leave a file the user already imported successfully untouched.
+        if let Some(import) = store.get_profile_system_file_import(&profile.id, &requirement.id)? {
+            if import.status == "ready" {
+                continue;
+            }
+        }
+        let Some(found) = find_bundled_system_file(search_dir, requirement) else {
+            continue;
+        };
+        let report =
+            import_profile_system_file_into_store(store, data_dir, profile, requirement, &found)?;
+        if report.error_code.is_none() {
+            adopted.push(requirement.id.clone());
+        }
+    }
+    Ok(adopted)
+}
+
+/// Locate a file under `dir` that satisfies a system-file requirement. Prefers
+/// an exact match on the requirement's target file name (e.g. `prod.keys`),
+/// then falls back to the first file with a matching extension.
+fn find_bundled_system_file(
+    dir: &Path,
+    requirement: &ProfileSystemFileRequirement,
+) -> Option<PathBuf> {
+    let wanted_name = requirement
+        .target_name
+        .as_deref()
+        .and_then(|target| Path::new(target).file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+
+    let mut stack = vec![dir.to_path_buf()];
+    let mut extension_match = None;
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_ascii_lowercase());
+            if let (Some(wanted), Some(name)) = (wanted_name.as_ref(), file_name.as_ref()) {
+                if name == wanted {
+                    return Some(path);
+                }
+            }
+            if extension_match.is_none()
+                && profile_system_file_matches_extension(&path, requirement)
+            {
+                extension_match = Some(path);
+            }
+        }
+    }
+    extension_match
+}
+
 pub(super) fn profile_system_file_target(
     data_dir: &Path,
     profile: &PlatformSetupProfile,
