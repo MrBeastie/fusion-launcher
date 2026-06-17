@@ -477,12 +477,18 @@ pub(super) fn import_asset_error(
 }
 
 pub(super) fn expected_asset_sha256(asset: &AssetView) -> Option<&str> {
-    asset.sources.iter().find_map(|source| match source {
-        SourceUri::Http { sha256, .. } => Some(sha256.as_str()),
-        SourceUri::Bundled { sha256, .. } => Some(sha256.as_str()),
-        SourceUri::Magnet { .. } => None,
-        SourceUri::UserProvided { sha256, .. } => sha256.as_deref(),
-    })
+    asset
+        .sources
+        .iter()
+        .find_map(|source| match source {
+            SourceUri::Http { sha256, .. } | SourceUri::Bundled { sha256, .. } => {
+                Some(sha256.as_str())
+            }
+            SourceUri::Magnet { .. } => None,
+            SourceUri::UserProvided { sha256, .. } => sha256.as_deref(),
+        })
+        .map(str::trim)
+        .filter(|sha256| !sha256.is_empty())
 }
 
 pub(super) fn is_download_ready_status(status: &str) -> bool {

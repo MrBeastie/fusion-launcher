@@ -11,14 +11,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{
-    GameArtwork, GameLaunchConfig, RepositoryGame, RepositoryMetadata, RepositorySchema, SourceUri,
+    AssetKind, GameArtwork, GameLaunchConfig, RepositoryAsset, RepositoryGame, RepositoryMetadata,
+    RepositorySchema, SourceUri,
 };
 use crate::security::validate_repository_url;
 
 /// Network requests give up after this long. Mirrors the repository loader so a
 /// hung mirror cannot wedge the UI indefinitely.
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(12);
-const MANIFEST_USER_AGENT: &str = concat!("FusionLauncher/", env!("CARGO_PKG_VERSION"));
 
 // ──────────────────────────────────────────────────────────────────────────
 //  Strongly-typed manifest model (mirrors the reference JSON)
@@ -56,8 +56,11 @@ pub struct Visuals {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Assets {
-    /// Magnet URI for the ROM download — the one genuinely required asset.
-    pub heavy_rom_magnet: String,
+    /// Optional magnet URI for the ROM download. If omitted or left as a
+    /// placeholder, the game is treated as user-provided and the user imports
+    /// their own local dump after emulator setup.
+    #[serde(default)]
+    pub heavy_rom_magnet: Option<String>,
     /// Manifests authored by users vary; every field below is optional so a
     /// renamed or omitted key does not fail the whole parse ("Empty Shell").
     #[serde(default)]
@@ -121,9 +124,9 @@ impl From<reqwest::Error> for AppError {
         // A decode failure means the body arrived but did not match `Manifest`;
         // everything else (connect, timeout, status) is a transport problem.
         if error.is_decode() {
-            AppError::Parse(error.to_string())
+            AppError::Parse(crate::net::format_reqwest_error("manifest", &error))
         } else {
-            AppError::Network(error.to_string())
+            AppError::Network(crate::net::format_reqwest_error("manifest", &error))
         }
     }
 }
@@ -145,12 +148,16 @@ pub async fn fetch_manifest(url: String) -> Result<Manifest, AppError> {
 /// (e.g. the orchestrator's manifest-driven install) call this directly so they
 /// can map [`AppError`] into their own error channel.
 pub(crate) async fn fetch_manifest_inner(url: &str) -> Result<Manifest, AppError> {
+    if looks_like_inline_manifest(url) {
+        return parse_manifest_json(url);
+    }
+
     // Enforce the project's HTTPS-only policy before touching the network.
     let endpoint = validate_repository_url(url, false).map_err(AppError::InvalidUrl)?;
 
     let client = reqwest::Client::builder()
         .timeout(MANIFEST_TIMEOUT)
-        .user_agent(MANIFEST_USER_AGENT)
+        .user_agent(crate::net::HTTP_USER_AGENT)
         .build()?; // reqwest::Error -> AppError (Network)
 
     let response = client
@@ -158,12 +165,93 @@ pub(crate) async fn fetch_manifest_inner(url: &str) -> Result<Manifest, AppError
         .send()
         .await? // connection / timeout -> AppError::Network
         .error_for_status()
-        .map_err(|error| AppError::Network(format!("manifest host returned an error: {error}")))?;
+        .map_err(|error| AppError::Network(crate::net::format_reqwest_error("manifest", &error)))?;
 
     // Invalid JSON or missing required fields -> AppError::Parse.
     let manifest = response.json::<Manifest>().await?;
+    validate_manifest(&manifest).map_err(AppError::Parse)?;
 
     Ok(manifest)
+}
+
+pub(crate) fn manifest_source_url(input: &str, manifest: &Manifest) -> String {
+    if looks_like_inline_manifest(input) {
+        format!("manifest:inline:{}", manifest.repository_id())
+    } else {
+        input.trim().to_string()
+    }
+}
+
+fn looks_like_inline_manifest(input: &str) -> bool {
+    input.trim_start().starts_with('{')
+}
+
+fn parse_manifest_json(input: &str) -> Result<Manifest, AppError> {
+    let manifest = serde_json::from_str::<Manifest>(input)
+        .map_err(|error| AppError::Parse(format!("Manifest JSON is invalid: {error}")))?;
+    validate_manifest(&manifest).map_err(AppError::Parse)?;
+    Ok(manifest)
+}
+
+fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
+    for game in &manifest.games {
+        manifest_download_source(game.assets.heavy_rom_magnet.as_deref()).map_err(|message| {
+            format!("{} heavy_rom_magnet is invalid: {message}", game.title_id)
+        })?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum ManifestDownloadSource {
+    Magnet(String),
+    UserProvided,
+}
+
+fn manifest_download_source(uri: Option<&str>) -> Result<ManifestDownloadSource, &'static str> {
+    let Some(trimmed) = uri.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(ManifestDownloadSource::UserProvided);
+    };
+    if !trimmed.starts_with("magnet:?") {
+        return Err("expected a magnet:? URI, or omit heavy_rom_magnet to require local import.");
+    }
+    let Some(hash) = btih_hash(trimmed) else {
+        return Err("expected xt=urn:btih:<hash>.");
+    };
+    if hash.contains("...") {
+        Ok(ManifestDownloadSource::UserProvided)
+    } else if is_valid_btih_hash(hash) {
+        Ok(ManifestDownloadSource::Magnet(trimmed.to_string()))
+    } else {
+        Err("expected a 40-character hex or 32-character base32 btih hash.")
+    }
+}
+
+fn btih_hash(uri: &str) -> Option<&str> {
+    let query = uri.strip_prefix("magnet:?")?;
+    for part in query.split('&') {
+        let (key, value) = part.split_once('=')?;
+        if key.eq_ignore_ascii_case("xt") {
+            let prefix = "urn:btih:";
+            if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+                return Some(&value[prefix.len()..]);
+            }
+        }
+    }
+    None
+}
+
+fn is_valid_btih_hash(hash: &str) -> bool {
+    match hash.len() {
+        40 => hash.chars().all(|ch| ch.is_ascii_hexdigit()),
+        32 => hash.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_uppercase(),
+                'A'..='Z' | '2'..='7'
+            )
+        }),
+        _ => false,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -172,9 +260,10 @@ pub(crate) async fn fetch_manifest_inner(url: &str) -> Result<Manifest, AppError
 //
 // The install/download/launch pipeline is driven entirely by `RepositorySchema`
 // stored in SQLite. Rather than fork that pipeline, a manifest is mapped onto a
-// synthetic repository so the existing orchestrator, torrent engine, and
-// launcher run unchanged:
-//   * `heavy_rom_magnet`  -> SourceUri::Magnet (the game's download source)
+// synthetic repository so the existing orchestrator, torrent engine, local
+// import flow, and launcher run unchanged:
+//   * valid `heavy_rom_magnet` -> SourceUri::Magnet
+//   * missing/placeholder magnet -> SourceUri::UserProvided
 //   * `launch_config.args`-> GameLaunchConfig.args_template (with {rom_path})
 //   * `visuals.*`         -> cover/hero artwork
 //
@@ -215,6 +304,11 @@ impl Manifest {
     /// sources; launch args carry over verbatim.
     pub fn to_repository_schema(&self) -> RepositorySchema {
         let repository_id = self.repository_id();
+        let system_files = self
+            .games
+            .iter()
+            .filter_map(|game| game.to_emulator_asset())
+            .collect();
         let catalog = self
             .games
             .iter()
@@ -234,26 +328,95 @@ impl Manifest {
                 content_hash: None,
                 updated_at: Some(self.last_updated.clone()),
             },
-            // Manifests do not describe BIOS/keys/firmware; those stay manual.
-            system_files: Vec::new(),
+            system_files,
             catalog,
         }
     }
 }
 
 impl Game {
+    pub(crate) fn emulator_asset_id(&self) -> String {
+        format!("{}-emulator-bundle", self.title_id)
+    }
+
+    fn to_emulator_asset(&self) -> Option<RepositoryAsset> {
+        let url = self.assets.core_bundle_url.as_deref()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+        let asset_id = self.emulator_asset_id();
+        let display_name = if self.launch_config.engine.trim().is_empty() {
+            format!("{} emulator bundle", self.title)
+        } else {
+            format!(
+                "{} emulator bundle ({})",
+                self.title, self.launch_config.engine
+            )
+        };
+
+        Some(RepositoryAsset {
+            id: asset_id.clone(),
+            platform: self.platform.clone(),
+            asset_kind: AssetKind::Emulator,
+            display_name,
+            sources: vec![SourceUri::Http {
+                url: url.to_string(),
+                sha256: self
+                    .assets
+                    .core_bundle_sha256
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+                size_bytes: None,
+            }],
+            install_hint: None,
+            executable: false,
+        })
+    }
+
     fn to_repository_game(&self) -> RepositoryGame {
         let cover = non_empty(&self.visuals.cover_url);
         let hero = non_empty(&self.visuals.background_url);
+        let required_system_file_ids = if self
+            .assets
+            .core_bundle_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .is_some()
+        {
+            vec![self.emulator_asset_id()]
+        } else {
+            Vec::new()
+        };
 
         // The magnet uri is the ROM download. `core_bundle_p2p_hash` is not a
         // BitTorrent info-hash for the ROM, so it is intentionally not used as
-        // info_hash here.
-        let downloads = vec![SourceUri::Magnet {
-            uri: self.assets.heavy_rom_magnet.clone(),
-            info_hash: None,
-            size_bytes: None,
-        }];
+        // info_hash here. Placeholder or missing magnets become local import.
+        let (downloads, content_mode) =
+            match manifest_download_source(self.assets.heavy_rom_magnet.as_deref())
+                .expect("manifest should be validated before conversion")
+            {
+                ManifestDownloadSource::Magnet(uri) => (
+                    vec![SourceUri::Magnet {
+                        uri,
+                        info_hash: None,
+                        size_bytes: None,
+                    }],
+                    None,
+                ),
+                ManifestDownloadSource::UserProvided => (
+                    vec![SourceUri::UserProvided {
+                        instructions: Some(
+                            "Import your own legally dumped game file to continue.".to_string(),
+                        ),
+                        sha256: None,
+                        size_bytes: None,
+                    }],
+                    Some("user_provided".to_string()),
+                ),
+            };
 
         // Re-join the pre-split args into a shell-safe template that
         // launcher::parse_launch_args can split back identically. {rom_path}
@@ -278,11 +441,11 @@ impl Game {
                 screenshots: Vec::new(),
             }),
             metadata: None,
-            content_mode: None,
+            content_mode,
             setup_profile_id: None,
             downloads,
             expected_extensions: expected_extensions_for(&self.platform),
-            required_system_file_ids: Vec::new(),
+            required_system_file_ids,
             launch: Some(GameLaunchConfig {
                 args_template,
                 preferred_file: None,
@@ -343,7 +506,7 @@ mod tests {
                     "background_url": "https://images.igdb.com/bg.jpg"
                 },
                 "assets": {
-                    "heavy_rom_magnet": "magnet:?xt=urn:btih:abc",
+                    "heavy_rom_magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
                     "core_bundle_p2p_hash": "hash123",
                     "shader_cache_url": "https://example.com/shaders.zip"
                 },
@@ -368,7 +531,10 @@ mod tests {
         assert_eq!(game.platform, "switch");
         assert_eq!(game.launch_config.engine, "eden");
         assert_eq!(game.launch_config.args, ["-f", "-g", "{rom_path}"]);
-        assert_eq!(game.assets.heavy_rom_magnet, "magnet:?xt=urn:btih:abc");
+        assert_eq!(
+            game.assets.heavy_rom_magnet.as_deref(),
+            Some("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
+        );
     }
 
     #[test]
@@ -387,6 +553,69 @@ mod tests {
         let value = serde_json::to_value(AppError::Network("boom".into())).unwrap();
         assert_eq!(value["kind"], "network");
         assert_eq!(value["message"], "boom");
+    }
+
+    #[tokio::test]
+    async fn fetch_manifest_accepts_inline_json_without_network() {
+        let manifest = fetch_manifest_inner(SAMPLE)
+            .await
+            .expect("inline manifest JSON should parse");
+
+        assert_eq!(manifest.repository_name, "Underground Retro Archive");
+        assert_eq!(manifest.games[0].title_id, "0100F2C0115B6000");
+    }
+
+    #[test]
+    fn inline_manifest_uses_stable_source_url() {
+        let manifest = parse_manifest_json(SAMPLE).expect("sample manifest should parse");
+
+        assert_eq!(
+            manifest_source_url(SAMPLE, &manifest),
+            "manifest:inline:manifest-underground-retro-archive"
+        );
+        assert_eq!(
+            manifest_source_url("  https://example.com/manifest.json  ", &manifest),
+            "https://example.com/manifest.json"
+        );
+    }
+
+    #[test]
+    fn manifest_download_source_treats_placeholders_as_user_provided() {
+        assert!(matches!(
+            manifest_download_source(Some("magnet:?xt=urn:btih:...")).unwrap(),
+            ManifestDownloadSource::UserProvided
+        ));
+        assert!(matches!(
+            manifest_download_source(None).unwrap(),
+            ManifestDownloadSource::UserProvided
+        ));
+    }
+
+    #[test]
+    fn manifest_download_source_accepts_hex_and_base32_btih() {
+        match manifest_download_source(Some(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+        ))
+        .unwrap()
+        {
+            ManifestDownloadSource::Magnet(uri) => {
+                assert!(uri.contains("0123456789abcdef0123456789abcdef01234567"));
+            }
+            ManifestDownloadSource::UserProvided => panic!("expected magnet source"),
+        }
+        assert!(matches!(
+            manifest_download_source(Some("magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"))
+                .unwrap(),
+            ManifestDownloadSource::Magnet(_)
+        ));
+    }
+
+    #[test]
+    fn manifest_download_source_rejects_bad_non_placeholder_btih() {
+        assert_eq!(
+            manifest_download_source(Some("magnet:?xt=urn:btih:abc")).unwrap_err(),
+            "expected a 40-character hex or 32-character base32 btih hash."
+        );
     }
 
     #[test]
@@ -409,16 +638,42 @@ mod tests {
         // The ROM magnet becomes the single download source.
         match &game.downloads[..] {
             [SourceUri::Magnet { uri, .. }] => {
-                assert_eq!(uri, "magnet:?xt=urn:btih:abc");
+                assert_eq!(
+                    uri,
+                    "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+                );
             }
             other => panic!("expected one magnet source, got {other:?}"),
         }
     }
 
     #[test]
+    fn placeholder_manifest_magnet_converts_to_user_provided_game() {
+        let manifest: Manifest = serde_json::from_str(&SAMPLE.replace(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "magnet:?xt=urn:btih:...",
+        ))
+        .unwrap();
+
+        validate_manifest(&manifest).unwrap();
+        let schema = manifest.to_repository_schema();
+        let game = &schema.catalog[0];
+        assert_eq!(game.content_mode.as_deref(), Some("user_provided"));
+        match &game.downloads[..] {
+            [SourceUri::UserProvided { instructions, .. }] => {
+                assert!(instructions
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("legally dumped"));
+            }
+            other => panic!("expected one user-provided source, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_manifest_without_optional_asset_fields() {
         // Mirrors a user-edited manifest: no core_bundle_p2p_hash, no
-        // shader_cache_url, only the ROM magnet plus an emulator URL.
+        // shader_cache_url, no ROM magnet, only an emulator URL.
         let json = r#"{
             "manifest_version": "1.0",
             "repository_name": "Underground Retro Archive",
@@ -429,7 +684,6 @@ mod tests {
                     "title": "Zelda",
                     "platform": "switch",
                     "assets": {
-                        "heavy_rom_magnet": "magnet:?xt=urn:btih:abc",
                         "core_bundle_url": "https://example.com/eden.zip"
                     },
                     "launch_config": {
@@ -443,6 +697,7 @@ mod tests {
 
         let manifest: Manifest = serde_json::from_str(json).expect("tolerant manifest parses");
         let game = &manifest.games[0];
+        assert!(game.assets.heavy_rom_magnet.is_none());
         assert!(game.assets.core_bundle_p2p_hash.is_none());
         assert!(game.assets.shader_cache_url.is_none());
         assert_eq!(
@@ -454,7 +709,24 @@ mod tests {
 
         // And it still converts for the install pipeline.
         let schema = manifest.to_repository_schema();
+        assert_eq!(schema.system_files.len(), 1);
+        assert_eq!(
+            schema.system_files[0].id,
+            "0100F2C0115B6000-emulator-bundle"
+        );
+        assert!(matches!(
+            schema.system_files[0].asset_kind,
+            AssetKind::Emulator
+        ));
         assert_eq!(schema.catalog.len(), 1);
+        assert_eq!(
+            schema.catalog[0].content_mode.as_deref(),
+            Some("user_provided")
+        );
+        assert_eq!(
+            schema.catalog[0].required_system_file_ids,
+            vec!["0100F2C0115B6000-emulator-bundle"]
+        );
     }
 
     #[test]

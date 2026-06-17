@@ -16,12 +16,12 @@ function gameWith(coreBundleUrl?: string | null): ManifestGame {
     game_version: '1.2.1',
     visuals: { cover_url: 'https://example.com/cover.png', background_url: 'https://example.com/bg.jpg' },
     assets: {
-      heavy_rom_magnet: 'magnet:?xt=urn:btih:abc',
+      heavy_rom_magnet: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
       core_bundle_p2p_hash: 'hash',
       shader_cache_url: 'https://example.com/shaders.zip',
       core_bundle_url: coreBundleUrl
     },
-    launch_config: { engine: 'suyu', executable: 'suyu-cmd.exe', args: ['-f', '{rom_path}'], inject_mods: [] }
+    launch_config: { engine: 'eden', executable: 'eden.exe', args: ['-f', '-g', '{rom_path}'], inject_mods: [] }
   };
 }
 
@@ -31,7 +31,7 @@ function resultWith(status: InstallResult['status']): InstallResult {
 
 describe('manifestGameHasEmulator', () => {
   it('is true when a non-empty core_bundle_url is present', () => {
-    assert.equal(manifestGameHasEmulator(gameWith('https://example.com/suyu.zip')), true);
+    assert.equal(manifestGameHasEmulator(gameWith('https://example.com/eden.zip')), true);
   });
 
   it('is false when core_bundle_url is missing, null, or blank', () => {
@@ -48,6 +48,7 @@ describe('manifestInstallOutcome', () => {
 
   it('maps every non-ready status to "attention"', () => {
     assert.equal(manifestInstallOutcome(resultWith('needs_system_files')), 'attention');
+    assert.equal(manifestInstallOutcome(resultWith('needs_game_file')), 'attention');
     assert.equal(manifestInstallOutcome(resultWith('error')), 'attention');
   });
 });

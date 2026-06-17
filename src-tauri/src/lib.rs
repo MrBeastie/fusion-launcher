@@ -13,8 +13,10 @@ mod emulator_profiles;
 mod game_files;
 mod github_resolver;
 mod launcher;
+mod libtorrent_engine;
 mod logging;
 mod manifest;
+mod net;
 mod orchestrator;
 mod rom_hasher;
 mod schema;
@@ -24,6 +26,7 @@ mod security;
 mod setup_profiles;
 mod storage;
 mod torrent;
+mod torrent_engine;
 
 use storage::RepositoryStore;
 use torrent::TorrentManager;
@@ -32,8 +35,8 @@ use torrent::TorrentManager;
 pub struct AppState {
     pub store: Arc<Mutex<RepositoryStore>>,
     pub data_dir: PathBuf,
-    /// `None` when the torrent engine failed to start this session (e.g. the
-    /// DHT UDP port was unavailable). Direct HTTP downloads keep working.
+    /// `None` when the torrent engine failed to start this session. Direct HTTP
+    /// downloads keep working.
     pub torrents: Option<TorrentManager>,
     pub running_games: Arc<Mutex<HashMap<String, u32>>>,
     pub library_scrape: scraper::LibraryScrapeRuntime,
@@ -57,6 +60,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = app
@@ -89,12 +93,11 @@ pub fn run() {
                 }
             }
             let store = Arc::new(Mutex::new(repository_store));
-            // Torrent startup is best-effort: a failure here (e.g. the DHT port
-            // is taken by another app) must not stop the launcher from opening.
-            // Direct HTTP downloads and the rest of the app work without it.
+            // Torrent startup is best-effort: a failure here must not stop the
+            // launcher from opening. The libtorrent sidecar is spawned lazily per
+            // download, so this rarely fails; direct HTTP downloads and the rest
+            // of the app work regardless.
             let torrents = match tauri::async_runtime::block_on(TorrentManager::new(
-                data_dir.join("Torrents"),
-                data_dir.join("torrent-session"),
                 data_dir.clone(),
                 Arc::clone(&store),
                 app.handle().clone(),

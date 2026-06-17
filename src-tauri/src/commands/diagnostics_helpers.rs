@@ -192,7 +192,7 @@ pub(super) fn build_health_report(state: &AppState) -> Result<HealthReport, Stri
         .filter(|download| matches!(download.status.as_str(), "resolving" | "downloading"))
         .count();
     let downloader = HealthCheckItem {
-        id: "downloader:librqbit".to_string(),
+        id: "downloader:libtorrent".to_string(),
         label: "Downloader session".to_string(),
         status: "ready".to_string(),
         message: Some(format!("{active_downloads} active torrent download(s)")),

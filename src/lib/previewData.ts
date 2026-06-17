@@ -16,6 +16,7 @@ import type {
   OnboardingState,
   PlatformSetupProfile,
   ProfileEmulatorConfig,
+  ProfileEmulatorRemovalReport,
   RepairLibraryReport,
   RepositoryPreview,
   RepositorySummary,
@@ -53,7 +54,7 @@ const repository: RepositorySummary = {
   catalogCount: 13,
   systemFileCount: 3,
   maintainer: 'Fusion Launcher Team',
-  homepageUrl: 'https://fusion.local',
+  homepageUrl: 'https://blessdevhq.github.io/fusion-launcher/',
   license: 'Legal homebrew/demo content',
   trustLevel: 'official',
   contentHash: '0'.repeat(64),
@@ -73,8 +74,8 @@ const catalog: CatalogGame[] = [
   ),
   game('crystal-caverns', 'gba', 'Crystal Caverns DX', 'A fast homebrew platformer tuned for short sessions.', ['.gba'], undefined, {
     artwork: {
-      cover: 'https://example.com/fusion-launcher/showcase/crystal-caverns-cover.jpg',
-      hero: 'https://example.com/fusion-launcher/showcase/crystal-caverns-hero.jpg'
+      cover: 'https://blessdevhq.github.io/fusion-launcher/fusion/app-icon.png',
+      hero: 'https://blessdevhq.github.io/fusion-launcher/fusion/og-image.png'
     },
     metadata: {
       releaseYear: 2026,
@@ -84,22 +85,22 @@ const catalog: CatalogGame[] = [
     }
   }),
   game('neon-rally', 'psp', 'Neon Rally Portable', 'Arcade racing with synthetic night tracks and drift challenges.', ['.iso']),
-  game('star-orbit', 'switch', 'Star Orbit Prototype', 'Техно-demo сообщества для проверки современных handheld-сценариев.', ['.nsp', '.xci'], [
+  game('star-orbit', 'switch', 'Star Orbit Prototype', 'Community tech demo for checking user-provided package flows.', ['.nsp', '.xci'], [
     { kind: 'user_provided', instructions: 'Импортируй локально собранный или легально снятый .nsp/.xci пакет.' }
   ], {
     contentMode: 'user_provided',
     setupProfileId: 'switch-manual',
     artwork: {
-      cover: 'https://example.com/fusion-launcher/showcase/star-orbit-cover.jpg',
-      hero: 'https://example.com/fusion-launcher/showcase/star-orbit-hero.jpg',
-      logo: 'https://example.com/fusion-launcher/showcase/star-orbit-logo.png'
+      cover: 'https://blessdevhq.github.io/fusion-launcher/fusion/hero-mascot.png',
+      hero: 'https://blessdevhq.github.io/fusion-launcher/fusion/hero-key-visual.png',
+      logo: 'https://blessdevhq.github.io/fusion-launcher/fusion/logo-lockup.png'
     },
     metadata: {
       releaseYear: 2026,
       developer: 'North Pier Interactive',
       publisher: 'Community Preview',
       genres: ['Приключение', 'Tech Demo'],
-      tags: ['user-provided', 'modern-console'],
+      tags: ['user-provided', 'showcase'],
       players: '1 игрок',
       series: 'Star Orbit'
     }
@@ -221,7 +222,7 @@ export const previewApi = {
       Object.assign(game, {
         artwork: {
           ...(game.artwork ?? {}),
-          cover: `https://example.com/fusion-launcher/screenscraper/${game.id}.jpg`
+          cover: 'https://blessdevhq.github.io/fusion-launcher/fusion/og-image.png'
         },
         metadata: {
           ...(game.metadata ?? {}),
@@ -371,9 +372,9 @@ export const previewApi = {
       if (isUserProvidedGame(game) || game.contentMode === 'metadata_only') {
         return {
           gameId,
-          status: 'error',
+          status: 'needs_game_file',
           errorCode: 'game_requires_import',
-          message: 'Импортируй локальный файл игры, чтобы продолжить.'
+          message: 'Emulator installed. Import your local game file to continue.'
         };
       }
       await previewApi.startGameDownload(gameId);
@@ -433,6 +434,24 @@ export const previewApi = {
         profile.id,
         `preview://emulators/${profile.platform}/${profile.emulator.executableName ?? `${profile.platform}.exe`}`
       );
+  },
+  async removeProfileEmulator(profileId: string): Promise<ProfileEmulatorRemovalReport> {
+    const profile = getPlatformSetupProfile(profileId);
+    if (!profile) throw new Error(`Unknown setup profile: ${profileId}`);
+    const existing = profileEmulatorConfigs.find((item) => item.profileId === profile.id);
+    const before = profileEmulatorConfigs.length;
+    profileEmulatorConfigs = profileEmulatorConfigs.filter((item) => item.profileId !== profile.id);
+    const removedConfig = profileEmulatorConfigs.length !== before;
+    const managed = profile.emulator.installMode === 'downloadable';
+
+    return {
+      profileId: profile.id,
+      platform: profile.platform,
+      removedConfig,
+      deletedFiles: managed && Boolean(existing),
+      removedPath: managed ? `preview://emulators/${profile.platform}` : null,
+      message: null
+    };
   },
   async selectProfileEmulator(profileId: string, executablePath: string): Promise<ProfileEmulatorConfig> {
     const profile = getPlatformSetupProfile(profileId);
@@ -506,7 +525,17 @@ export const previewApi = {
     return profileEmulatorConfigs.length !== before;
   },
   async downloadAsset(assetId: string): Promise<DownloadRecord> {
-    return downloadRecord(assetId, 'asset');
+    const record = downloadRecord(assetId, 'asset');
+    const torrentRecord = directDownloadRecord(
+      assetId,
+      'asset:http',
+      record.localPath ?? `preview://asset/${assetId}`,
+      24_592,
+      'asset',
+      assetId
+    );
+    downloads = [torrentRecord, ...downloads.filter((item) => item.gameId !== assetId)];
+    return record;
   },
   async importAssetFile(assetId: string, sourcePath: string): Promise<ImportAssetFileReport> {
     if (!assetId.trim()) {
@@ -564,7 +593,9 @@ export const previewApi = {
         gameId,
         source.kind,
         record.localPath ?? `${downloadRoot}/${gameId}`,
-        source.sizeBytes ?? 24_592
+        source.sizeBytes ?? 24_592,
+        'game',
+        game?.title ?? gameId
       );
       downloads = [torrentRecord, ...downloads.filter((item) => item.gameId !== gameId)];
       return { gameId, sourceKind: source.kind, saveDir: torrentRecord.saveDir, record, torrent: torrentRecord };
@@ -598,7 +629,7 @@ export const previewApi = {
     return downloads.length !== before;
   },
   async redownloadAsset(assetId: string): Promise<DownloadRecord> {
-    return downloadRecord(assetId, 'asset');
+    return previewApi.downloadAsset(assetId);
   },
   async openGameFolder(_gameId: string): Promise<void> {},
   async openEmulatorFolder(_platform: string): Promise<void> {},
@@ -832,13 +863,17 @@ function torrent(
 
 function directDownloadRecord(
   gameId: string,
-  sourceKind: 'http' | 'bundled' | 'user_import',
+  sourceKind: 'http' | 'bundled' | 'user_import' | 'asset:http' | 'asset:bundled',
   saveDir: string,
-  totalBytes: number
+  totalBytes: number,
+  subjectType: TorrentDownloadRecord['subjectType'] = 'game',
+  displayName?: string
 ): TorrentDownloadRecord {
   const timestamp = new Date().toISOString();
   return {
     gameId,
+    subjectType,
+    displayName: displayName ?? gameId,
     magnetUri: `direct:${sourceKind}`,
     saveDir,
     status: 'completed',

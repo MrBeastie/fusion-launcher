@@ -224,8 +224,8 @@ export const en = {
       executableRequiresTrust: 'Executable files require a trusted source',
       manifest: {
         title: 'Install from manifest',
-        copy: 'Load a JSON manifest and install a game directly. The manifest provides the ROM and, when present, the emulator download.',
-        placeholder: 'https://example.com/manifest.json',
+        copy: 'Load a JSON manifest by URL or paste the JSON directly. The manifest can provide an emulator bundle; games without a real magnet are imported locally.',
+        placeholder: 'https://example.com/manifest.json or paste manifest JSON',
         load: 'Load',
         gamesTitle: 'Games in manifest',
         empty: 'This manifest has no games.',
@@ -949,7 +949,7 @@ export const ru: UiText = {
       manifest: {
         title: 'Установка из манифеста',
         copy: 'Загрузи JSON-манифест и установи игру напрямую. Манифест содержит ROM и, при наличии, ссылку на эмулятор.',
-        placeholder: 'https://example.com/manifest.json',
+        placeholder: 'https://example.com/manifest.json or paste manifest JSON',
         load: 'Загрузить',
         gamesTitle: 'Игры в манифесте',
         empty: 'В этом манифесте нет игр.',

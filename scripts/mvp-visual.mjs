@@ -36,7 +36,9 @@ async function main() {
   await expectVisible(page.getByTestId('onboarding-demo-card'), 'onboarding demo source card');
   await expectVisible(page.getByTestId('onboarding-source-card'), 'onboarding community source card');
   const onboardingSource = page.getByTestId('onboarding-source-card');
-  await onboardingSource.getByPlaceholder('https://example.com/repo.json').fill('https://community.example/fusion-launcher-repository.json');
+  await onboardingSource
+    .getByPlaceholder('https://blessdevhq.github.io/fusion-launcher/source-library-template/repository.json')
+    .fill('https://blessdevhq.github.io/fusion-launcher/source-library-template/repository.json');
   await onboardingSource.getByRole('button', { name: 'Check' }).click();
   await expectVisible(page.getByTestId('onboarding-source-preview'), 'onboarding source preview');
 

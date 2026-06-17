@@ -33,6 +33,8 @@ pub(super) fn emit_direct_download_record(app: &AppHandle, record: &TorrentDownl
         "download:progress",
         crate::torrent::DownloadProgressEvent {
             game_id: record.game_id.clone(),
+            subject_type: record.subject_type.clone(),
+            display_name: record.display_name.clone(),
             status: record.status.clone(),
             progress: record.progress_percent / 100.0,
             progress_percent: record.progress_percent,

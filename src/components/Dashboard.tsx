@@ -13,6 +13,7 @@ import { ExploreScreen } from '@/components/dashboard/ExploreScreen';
 import { HomeScreen } from '@/components/dashboard/HomeScreen';
 import { LibraryScreen } from '@/components/dashboard/LibraryScreen';
 import { TopChrome } from '@/components/dashboard/TopChrome';
+import { ACTIVE_DOWNLOAD_STATUSES } from '@/components/dashboard/constants';
 import type { BusyAction, UpdatePanelState } from '@/components/dashboard/types';
 import { composeHomeRails, cssEscape, normalizeUpdateCheckError, safeDecodeURIComponent } from '@/components/dashboard/utils';
 import { AppShell } from '@/components/shell/AppShell';
@@ -167,9 +168,9 @@ export function Dashboard({
     [libraryStatuses, settings, storeCatalog]
   );
   const itemsByGameId = useMemo(() => new Map(items.map((item) => [item.game.id, item])), [items]);
-  const activeDownloadItems = useMemo(
-    () => items.filter((item) => item.isDownloading || item.isPaused || item.hasError),
-    [items]
+  const activeDownloadsCount = useMemo(
+    () => downloads.filter((download) => ACTIVE_DOWNLOAD_STATUSES.includes(download.status)).length,
+    [downloads]
   );
   const selectedGame = selectedGameId ? storeCatalog.find((game) => game.id === selectedGameId) ?? null : null;
   const visibleLibraryItems = useMemo(
@@ -552,7 +553,7 @@ export function Dashboard({
       <AppShell
         activeView={activeView}
         repositoriesCount={storeRepositories.length}
-        activeDownloadsCount={activeDownloadItems.length}
+        activeDownloadsCount={activeDownloadsCount}
         onNavigate={setActiveView}
         onOpenSettings={() => {
           setNotificationsOpen(false);
@@ -622,7 +623,9 @@ export function Dashboard({
               const item = itemsByGameId.get(gameId);
               const record = downloads.find((download) => download.gameId === gameId) ?? item?.download;
               return runAction(`resume:${gameId}`, () => (
-                isDirectGameDownload(item?.game, record)
+                record?.subjectType === 'asset' || record?.magnetUri.startsWith('direct:asset:')
+                  ? api.downloadAsset(gameId)
+                  : isDirectGameDownload(item?.game, record)
                   ? api.startGameDownload(gameId)
                   : api.resumeDownload(gameId)
               ));

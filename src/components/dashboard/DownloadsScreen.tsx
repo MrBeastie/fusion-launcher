@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
-import { Ban, Loader2, Pause, Play, RotateCw } from 'lucide-react';
+import { Ban, Loader2, Package, Pause, Play, RotateCw } from 'lucide-react';
 import { useI18n } from '@/components/I18nProvider';
 import { GameArt } from '@/components/shell/GamePoster';
 import type { GameLibraryItem } from '@/lib/libraryStatus';
@@ -97,8 +97,12 @@ function DownloadRow({
   const { t } = useI18n();
   const active = ACTIVE_DOWNLOAD_STATUSES.includes(download.status);
   const resumable = RESUMABLE_DOWNLOAD_STATUSES.includes(download.status);
-  const cancellable = !['completed', 'cancelled', 'cancelling'].includes(download.status);
+  const direct = download.magnetUri.startsWith('direct:');
+  const cancellable = !direct && !['completed', 'cancelled', 'cancelling'].includes(download.status);
   const statusHint = downloadStatusHint(download, t);
+  const title = item?.game.title ?? download.displayName ?? download.gameId;
+  const assetDownload = download.subjectType === 'asset' || download.magnetUri.startsWith('direct:asset:');
+  const subjectLabel = assetDownload ? 'RESOURCE' : download.subjectType === 'game' ? 'GAME' : null;
 
   return (
     <article className="rh-download-row" data-testid="download-row">
@@ -109,12 +113,19 @@ function DownloadRow({
         onClick={() => item && onOpenDetails(item.game)}
         className="rh-download-art rh-focusable"
       >
-        {item ? <GameArt game={item.game} className="h-full w-full" /> : null}
+        {item ? (
+          <GameArt game={item.game} className="h-full w-full" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center bg-white/[0.04] text-white/44">
+            <Package className="h-5 w-5" />
+          </div>
+        )}
       </button>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="truncate text-sm font-black">{item?.game.title ?? download.gameId}</div>
+          <div className="truncate text-sm font-black">{title}</div>
           <span className="rounded border border-white/10 px-2 py-1 text-[10px] uppercase text-white/54">{t.gameDetails.downloadTitles[download.status]}</span>
+          {subjectLabel && <span className="rounded border border-white/10 px-2 py-1 text-[10px] uppercase text-white/38">{subjectLabel}</span>}
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded bg-black/42">
           <div className="h-full rounded bg-fusion-accent" style={{ width: `${download.status === 'completed' ? 100 : download.progressPercent}%` }} />
@@ -129,7 +140,7 @@ function DownloadRow({
         {download.errorMessage && <div className="mt-2 text-xs text-red-100">{download.errorMessage}</div>}
       </div>
       <div className="flex flex-wrap justify-end gap-2">
-        {active && download.status !== 'cancelling' && (
+        {active && !direct && download.status !== 'cancelling' && (
           <IconAction
             focusId={`download-action:pause:${encodeURIComponent(download.gameId)}`}
             onFocus={onFocus}

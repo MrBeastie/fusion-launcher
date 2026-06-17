@@ -8,7 +8,7 @@ export interface ManifestVisuals {
 }
 
 export interface ManifestAssets {
-  heavy_rom_magnet: string;
+  heavy_rom_magnet?: string | null;
   core_bundle_p2p_hash?: string | null;
   shader_cache_url?: string | null;
   core_bundle_url?: string | null;

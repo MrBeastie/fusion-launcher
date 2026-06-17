@@ -2,11 +2,20 @@
 pub async fn download_asset(
     asset_id: String,
     state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<DownloadRecord, String> {
+    download_asset_internal(&asset_id, state.inner(), &app).await
+}
+
+pub(crate) async fn download_asset_internal(
+    asset_id: &str,
+    state: &AppState,
+    app: &AppHandle,
 ) -> Result<DownloadRecord, String> {
     let asset = {
-        let store = lock_store(&state)?;
+        let store = lock_app_store(state)?;
         store
-            .get_asset(&asset_id)?
+            .get_asset(asset_id)?
             .ok_or_else(|| format!("Unknown asset: {asset_id}"))?
     };
 
@@ -16,7 +25,7 @@ pub async fn download_asset(
         .ok_or_else(|| format!("Asset {} has no sources.", asset.display_name))?;
     if matches!(source, SourceUri::UserProvided { .. }) {
         let destination = {
-            let store = lock_store(&state)?;
+            let store = lock_app_store(state)?;
             resolve_asset_target(&store, &state.data_dir, &asset, source)
                 .map_err(|blocked| blocked.message)?
         };
@@ -25,7 +34,7 @@ pub async fn download_asset(
             "{} is user-provided. Place the file at {} or use Import file.",
             asset.display_name, target_path
         );
-        let store = lock_store(&state)?;
+        let store = lock_app_store(state)?;
         let _ = store.record_asset_installation(
             &asset.id,
             Some(&target_path),
@@ -37,7 +46,7 @@ pub async fn download_asset(
         return Err(message);
     }
     let destination = {
-        let store = lock_store(&state)?;
+        let store = lock_app_store(state)?;
         match resolve_asset_target(&store, &state.data_dir, &asset, source) {
             Ok(path) => path,
             Err(blocked) => {
@@ -55,10 +64,52 @@ pub async fn download_asset(
         }
     };
 
-    match download_source_to_file(source, &destination).await {
+    let source_kind = direct_source_kind(source);
+    let target_path = destination.to_string_lossy().to_string();
+    let expected_bytes = source_size_bytes(source).unwrap_or(0);
+
+    let started = lock_app_store(state)?.record_direct_asset_download_started(
+        &asset.id,
+        source_kind,
+        &target_path,
+        expected_bytes,
+    )?;
+    emit_direct_download_record(app, &started);
+    let download_result = {
+        let asset_id = asset.id.clone();
+        crate::downloads::download_source_to_file_with_progress(
+            source,
+            &destination,
+            |downloaded, total| {
+                let percent = match total {
+                    Some(total) if total > 0 => (downloaded as f64 / total as f64) * 100.0,
+                    _ => 0.0,
+                };
+                if let Ok(store) = lock_app_store(state) {
+                    if let Ok(record) = store.update_torrent_progress(
+                        &asset_id,
+                        "downloading",
+                        percent,
+                        downloaded,
+                        total.unwrap_or(0),
+                        0,
+                        0,
+                        0,
+                    ) {
+                        drop(store);
+                        emit_direct_download_record(app, &record);
+                    }
+                }
+            },
+        )
+        .await
+    };
+
+    match download_result {
         Ok(file) => {
             let local_path = file.path.to_string_lossy().to_string();
-            let store = lock_store(&state)?;
+            let total_bytes = source_size_bytes(source).unwrap_or_else(|| file_size(&file.path));
+            let store = lock_app_store(state)?;
             store.record_asset_installation(
                 &asset.id,
                 Some(&local_path),
@@ -66,16 +117,19 @@ pub async fn download_asset(
                 Some(&file.sha256),
                 None,
             )?;
-            store.record_download(
+            let (record, torrent) = store.record_direct_asset_download_completed(
                 &asset.id,
-                "asset",
-                Some(&local_path),
-                Some(&file.sha256),
-                None,
-            )
+                source_kind,
+                &local_path,
+                &file.sha256,
+                total_bytes,
+            )?;
+            drop(store);
+            emit_direct_download_record(app, &torrent);
+            Ok(record)
         }
         Err(error) => {
-            let store = lock_store(&state)?;
+            let store = lock_app_store(state)?;
             let target_path = destination.to_string_lossy().to_string();
             let _ = store.record_asset_installation(
                 &asset.id,
@@ -84,7 +138,16 @@ pub async fn download_asset(
                 None,
                 Some(&error),
             );
-            let _ = store.record_download(&asset.id, "asset", None, None, Some(&error));
+            if let Ok(record) = store.record_direct_asset_download_failed(
+                &asset.id,
+                source_kind,
+                &target_path,
+                expected_bytes,
+                &error,
+            ) {
+                drop(store);
+                emit_direct_download_record(app, &record);
+            }
             Err(error)
         }
     }
@@ -474,6 +537,7 @@ pub async fn remove_game(
 pub async fn redownload_asset(
     asset_id: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<DownloadRecord, String> {
     let current = {
         let store = lock_store(&state)?;
@@ -483,7 +547,7 @@ pub async fn redownload_asset(
         let candidate = PathBuf::from(path);
         let _ = remove_path_if_allowed(&state.data_dir, &download_root(&state)?, &candidate);
     }
-    download_asset(asset_id, state).await
+    download_asset(asset_id, state, app).await
 }
 
 #[tauri::command]

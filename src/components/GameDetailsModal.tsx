@@ -422,11 +422,18 @@ export function GameDetailsModal({
   const status = download.status;
   const progressPercent = (download.canPlay ? 100 : download.progressPercent).toFixed(1);
   const statusMessage = message ?? download.errorMessage;
-  const showDownloadPanel = download.isLoading || (status !== null && status !== 'cancelled');
-  const canDownload = !download.isLoading && (status === null || status === 'cancelled');
   const gameFileReady = setupState ? setupState.gameFile.status === 'ready' : download.canPlay;
   const launchReady = setupState ? setupState.launch.status === 'ready' : Boolean(requirements?.ready);
+  const showDownloadPanel = download.isLoading || (status !== null && status !== 'cancelled');
+  const showInstallAction = !showDownloadPanel && !userProvidedGame && !launchReady;
+  const showImportAction = !showDownloadPanel && userProvidedGame && !gameFileReady;
+  const canDownload = !download.isLoading && (status === null || status === 'cancelled') && !launchReady;
   const canPlay = gameFileReady && launchReady && Boolean(saveDir) && busy === null;
+  const setupActionClass = 'inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40';
+  const secondaryActionClass = 'inline-flex h-10 items-center gap-2 rounded-md border border-white/10 px-4 text-sm font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40';
+  const playActionClass = canPlay
+    ? 'inline-flex h-10 items-center gap-2 rounded-lg bg-fusion-accent px-4 text-sm font-bold text-fusion-accentOn shadow-glow transition hover:bg-fusion-accentHover'
+    : 'inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-4 text-sm font-semibold text-white/38 transition disabled:opacity-60';
   const downloadTitle = download.isLoading
     ? t.gameDetails.downloadTitles.checking
     : status
@@ -668,80 +675,84 @@ export function GameDetailsModal({
                     )}
                   </div>
                 </div>
-              ) : userProvidedGame ? (
-                <button
-                  data-testid="import-game-file"
-                  onClick={() => void handleImportGame()}
-                  disabled={busy !== null || metadataOnlyGame}
-                  className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
-                >
-                  {busy === 'import-game' ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  {t.gameDetails.setup.importGameFile}
-                </button>
-              ) : (
-                <button
-                  onClick={() => void handleInstall()}
-                  disabled={!canDownload || !downloadableSource || busy !== null || orchestrator.running}
-                  className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
-                >
-                  {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  {downloadableSource ? t.common.install : t.gameDetails.setup.manualSource}
-                </button>
-              )}
+              ) : null}
 
-              {status === 'completed' && !launchReady && !userProvidedGame && (
-                <button
-                  onClick={() => void handleInstall()}
-                  disabled={busy !== null || orchestrator.running}
-                  className="inline-flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.06] px-4 text-sm font-semibold text-white/76 transition hover:bg-white/12 disabled:opacity-40"
-                >
-                  {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
-                  {t.gameDetails.setup.finishSetup}
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {showImportAction && (
+                  <button
+                    data-testid="import-game-file"
+                    onClick={() => void handleImportGame()}
+                    disabled={busy !== null || metadataOnlyGame}
+                    className={setupActionClass}
+                  >
+                    {busy === 'import-game' ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
+                    {t.gameDetails.setup.importGameFile}
+                  </button>
+                )}
+                {showInstallAction && (
+                  <button
+                    onClick={() => void handleInstall()}
+                    disabled={!canDownload || !downloadableSource || busy !== null || orchestrator.running}
+                    className={setupActionClass}
+                  >
+                    {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
+                    {downloadableSource ? t.common.install : t.gameDetails.setup.manualSource}
+                  </button>
+                )}
+                {status === 'completed' && !launchReady && !userProvidedGame && (
+                  <button
+                    onClick={() => void handleInstall()}
+                    disabled={busy !== null || orchestrator.running}
+                    className={secondaryActionClass}
+                  >
+                    {orchestrator.running ? <Loader2 className="h-4 w-4 animate-spin" /> : <DownloadIcon className="h-4 w-4" />}
+                    {t.gameDetails.setup.finishSetup}
+                  </button>
+                )}
 
-              <button
-                onClick={handlePlay}
-                disabled={!canPlay}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-fusion-accent px-4 text-sm font-bold text-fusion-accentOn shadow-glow transition hover:bg-fusion-accentHover disabled:opacity-40"
-              >
-                {busy === 'launch' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                {t.gameDetails.setup.play}
-              </button>
-              <button
-                onClick={() => setShowSetupDetails((current) => !current)}
-                disabled={orchestrator.running}
-                className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-white/10 px-4 text-sm font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
-              >
-                {showSetupDetails ? t.gameDetails.setup.hideDetails : t.gameDetails.setup.details}
-              </button>
-              {(download.canPlay || status === 'completed') && (
                 <button
-                  onClick={() => runDownloadAction('open-folder', () => api.openGameFolder(game.id))}
-                  disabled={busy !== null}
-                  className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-white/10 px-4 text-sm font-semibold text-white/72 transition hover:bg-white/10 disabled:opacity-40"
+                  onClick={handlePlay}
+                  disabled={!canPlay}
+                  className={playActionClass}
                 >
-                  {t.gameDetails.setup.openFolder}
+                  {busy === 'launch' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {t.gameDetails.setup.play}
                 </button>
-              )}
-              {(download.canPlay || status === 'completed' || status === 'cancelled') && (
                 <button
-                  onClick={() => {
-                    if (window.confirm(t.gameDetails.messages.removeConfirm(displayProductText(game.title)))) {
-                      void runDownloadAction('remove', () => api.removeGame(game.id, true));
-                    }
-                  }}
-                  disabled={busy !== null}
-                  className="ml-2 inline-flex h-10 items-center gap-2 rounded-md border border-red-300/20 px-4 text-sm font-semibold text-red-100/80 transition hover:bg-red-300/10 disabled:opacity-40"
+                  onClick={() => setShowSetupDetails((current) => !current)}
+                  disabled={orchestrator.running}
+                  className={secondaryActionClass}
                 >
-                  {t.gameDetails.setup.deleteFiles}
+                  {showSetupDetails ? t.gameDetails.setup.hideDetails : t.gameDetails.setup.details}
                 </button>
-              )}
+                {(download.canPlay || status === 'completed') && (
+                  <button
+                    onClick={() => runDownloadAction('open-folder', () => api.openGameFolder(game.id))}
+                    disabled={busy !== null}
+                    className={secondaryActionClass}
+                  >
+                    {t.gameDetails.setup.openFolder}
+                  </button>
+                )}
+                {(download.canPlay || status === 'completed' || status === 'cancelled') && (
+                  <button
+                    onClick={() => {
+                      if (window.confirm(t.gameDetails.messages.removeConfirm(displayProductText(game.title)))) {
+                        void runDownloadAction('remove', () => api.removeGame(game.id, true));
+                      }
+                    }}
+                    disabled={busy !== null}
+                    className="inline-flex h-10 items-center gap-2 rounded-md border border-red-300/20 px-4 text-sm font-semibold text-red-100/80 transition hover:bg-red-300/10 disabled:opacity-40"
+                  >
+                    {t.gameDetails.setup.deleteFiles}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
         {orchestrator.running && orchestrator.progress && (
-          <InstallProgressOverlay progress={orchestrator.progress} />
+          <InstallProgressOverlay progress={orchestrator.progress} onClose={onClose} />
         )}
       </section>
 

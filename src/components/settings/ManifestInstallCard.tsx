@@ -14,24 +14,26 @@ import type { Manifest, ManifestGame } from '@/types/manifest';
 export function ManifestInstallCard({ onInstalled }: { onInstalled: () => Promise<void> }) {
   const { t } = useI18n();
   const strings = t.settings.sourcesPanel.manifest;
-  const [url, setUrl] = useState('');
+  const [manifestInput, setManifestInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, ManifestInstallOutcome>>({});
 
-  const trimmedUrl = url.trim();
+  const trimmedInput = manifestInput.trim();
   const busy = loading || installingId !== null;
 
   const loadManifest = async () => {
-    if (!trimmedUrl) return;
+    if (!trimmedInput) return;
     setLoading(true);
     setError(null);
+    setNotice(null);
     setManifest(null);
     setResults({});
     try {
-      setManifest(await api.fetchManifest(trimmedUrl));
+      setManifest(await api.fetchManifest(trimmedInput));
     } catch (caught) {
       setError(extractErrorMessage(caught));
     } finally {
@@ -42,12 +44,13 @@ export function ManifestInstallCard({ onInstalled }: { onInstalled: () => Promis
   const installGame = async (game: ManifestGame) => {
     setInstallingId(game.title_id);
     setError(null);
+    setNotice(null);
     try {
-      const result = await api.installGameFromManifest(trimmedUrl, game.title_id);
+      const result = await api.installGameFromManifest(trimmedInput, game.title_id);
       const outcome = manifestInstallOutcome(result);
       setResults((current) => ({ ...current, [game.title_id]: outcome }));
       if (outcome !== 'ready') {
-        setError(result.message ?? result.errorCode ?? strings.needsAttention);
+        setNotice(result.message ?? result.errorCode ?? strings.needsAttention);
       }
       await onInstalled();
     } catch (caught) {
@@ -66,20 +69,20 @@ export function ManifestInstallCard({ onInstalled }: { onInstalled: () => Promis
       <p className="mt-2 max-w-2xl text-sm leading-6 text-white/[0.52]">{strings.copy}</p>
 
       <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
-        <input
-          value={url}
-          onChange={(event) => setUrl(event.target.value)}
+        <textarea
+          value={manifestInput}
+          onChange={(event) => setManifestInput(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && !busy && trimmedUrl) void loadManifest();
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !busy && trimmedInput) void loadManifest();
           }}
-          className="h-11 min-w-0 rounded-sm border border-white/10 bg-black/40 px-3 text-sm text-white/80 outline-none transition placeholder:text-white/25 focus:border-white/60"
+          className="min-h-24 min-w-0 resize-y rounded-sm border border-white/10 bg-black/40 px-3 py-2 text-sm text-white/80 outline-none transition placeholder:text-white/25 focus:border-white/60"
           placeholder={strings.placeholder}
           data-testid="manifest-url"
         />
         <button
           type="button"
           onClick={loadManifest}
-          disabled={busy || !trimmedUrl}
+          disabled={busy || !trimmedInput}
           className="rh-mini-action h-11 justify-center"
           data-testid="manifest-load"
         >
@@ -92,6 +95,13 @@ export function ManifestInstallCard({ onInstalled }: { onInstalled: () => Promis
         <div className="mt-3 flex items-center gap-2 rounded-sm border border-red-300/[0.2] bg-red-300/10 px-3 py-2 text-xs font-semibold text-red-100/90">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
+        </div>
+      )}
+
+      {notice && (
+        <div className="mt-3 flex items-center gap-2 rounded-sm border border-amber-200/[0.22] bg-amber-300/10 px-3 py-2 text-xs font-semibold text-amber-100/90">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 break-words">{notice}</span>
         </div>
       )}
 
