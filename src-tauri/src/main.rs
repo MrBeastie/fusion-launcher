@@ -1,3 +1,8 @@
+// Prevents an extra empty console window from opening alongside the app on
+// Windows release builds. Kept enabled only in release so `tauri:dev` still
+// shows logs in the terminal.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 fn main() {
     let package_smoke = std::env::var("FUSION_LAUNCHER_PACKAGE_SMOKE")
         .or_else(|_| std::env::var("RETROHYDRA_PACKAGE_SMOKE"));
