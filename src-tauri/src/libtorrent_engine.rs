@@ -75,7 +75,14 @@ struct TorrentEntry {
     /// Set when the manager paused/cancelled this torrent, so the process's
     /// termination is treated as intentional rather than a crash.
     user_stopped: bool,
+    /// Tail of the sidecar's stderr (diagnostics, e.g. `fatal: ...` lines). Kept
+    /// so an unexpected exit can surface the real Python error instead of a bare
+    /// exit code.
+    recent_stderr: Vec<String>,
 }
+
+/// Keep only the last few stderr lines so a crash report stays readable.
+const MAX_STDERR_LINES: usize = 8;
 
 pub struct LibtorrentEngine {
     app: AppHandle,
@@ -129,6 +136,25 @@ impl LibtorrentEngine {
                             }
                         }
                     }
+                    CommandEvent::Stderr(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        if let Ok(mut map) = torrents.lock() {
+                            if let Some(entry) = map.get_mut(&id) {
+                                for line in text.lines() {
+                                    let line = line.trim();
+                                    if line.is_empty() {
+                                        continue;
+                                    }
+                                    entry.recent_stderr.push(line.to_string());
+                                }
+                                let overflow =
+                                    entry.recent_stderr.len().saturating_sub(MAX_STDERR_LINES);
+                                if overflow > 0 {
+                                    entry.recent_stderr.drain(0..overflow);
+                                }
+                            }
+                        }
+                    }
                     CommandEvent::Error(message) => {
                         if let Ok(mut map) = torrents.lock() {
                             if let Some(entry) = map.get_mut(&id) {
@@ -145,8 +171,13 @@ impl LibtorrentEngine {
                                 if completed {
                                     entry.stats.finished = true;
                                 } else if !entry.user_stopped && payload.code != Some(0) {
+                                    let detail = if entry.recent_stderr.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" {}", entry.recent_stderr.join(" | "))
+                                    };
                                     entry.stats.error = Some(format!(
-                                        "Torrent sidecar exited unexpectedly (code {:?}).",
+                                        "Torrent sidecar exited unexpectedly (code {:?}).{detail}",
                                         payload.code
                                     ));
                                 }
@@ -180,6 +211,7 @@ impl TorrentEngine for LibtorrentEngine {
                     child: None,
                     stats: EngineTorrentStats::default(),
                     user_stopped: false,
+                    recent_stderr: Vec::new(),
                 },
             );
         }
@@ -220,6 +252,9 @@ impl TorrentEngine for LibtorrentEngine {
                 return Ok(());
             };
             entry.user_stopped = false;
+            // Drop stale diagnostics from the previous run so a fresh failure
+            // reports its own stderr, not the last one's.
+            entry.recent_stderr.clear();
             (entry.magnet.clone(), entry.save_dir.clone())
         };
 
