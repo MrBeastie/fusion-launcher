@@ -196,6 +196,15 @@ impl RepositoryStore {
               updated_at TEXT NOT NULL
             );
 
+            -- Links a child download (e.g. an emulator/core bundle pulled in while
+            -- installing a game) to the parent game install, so the Downloads view
+            -- can group them instead of showing two unrelated rows.
+            CREATE TABLE IF NOT EXISTS download_parents (
+              child_game_id TEXT PRIMARY KEY,
+              parent_game_id TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_assets_repository ON repository_assets(repository_id);
             CREATE INDEX IF NOT EXISTS idx_games_repository ON catalog_games(repository_id);
             CREATE INDEX IF NOT EXISTS idx_torrent_downloads_status ON torrent_downloads(status);

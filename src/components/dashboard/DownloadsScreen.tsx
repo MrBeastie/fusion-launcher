@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
-import { Ban, Clipboard, FolderOpen, Loader2, Package, Pause, Play, RotateCw, Trash2 } from 'lucide-react';
+import { Ban, FolderOpen, Loader2, Package, Pause, Play, RotateCw, Trash2 } from 'lucide-react';
 import { useI18n } from '@/components/I18nProvider';
 import { GameArt } from '@/components/shell/GamePoster';
 import type { GameLibraryItem } from '@/lib/libraryStatus';
@@ -43,6 +43,38 @@ export function DownloadsScreen({
     ? t.dashboard.downloads.activeDescription(downloads.length)
     : t.dashboard.downloads.idleDescription(downloads.length);
 
+  // Group child downloads (e.g. an emulator/core bundle pulled in while
+  // installing a game) under their parent game so they render together instead
+  // of as two unrelated rows. A child whose parent is not in the list falls back
+  // to rendering at the top level.
+  const byId = new Map(downloads.map((download) => [download.gameId, download]));
+  const isChildOf = (download: TorrentDownloadRecord) =>
+    Boolean(download.parentGameId && download.parentGameId !== download.gameId && byId.has(download.parentGameId));
+  const childrenByParent = new Map<string, TorrentDownloadRecord[]>();
+  for (const download of downloads) {
+    if (isChildOf(download)) {
+      const siblings = childrenByParent.get(download.parentGameId!) ?? [];
+      siblings.push(download);
+      childrenByParent.set(download.parentGameId!, siblings);
+    }
+  }
+  const groups = downloads
+    .filter((download) => !isChildOf(download))
+    .map((parent) => ({ parent, children: childrenByParent.get(parent.gameId) ?? [] }));
+
+  const sharedRowProps = {
+    busyAction,
+    onOpenDetails,
+    onPause,
+    onResume,
+    onResumeTo,
+    onCancel,
+    onOpenFolder,
+    onDeleteFiles,
+    onPlay,
+    onFocus
+  };
+
   return (
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="rh-screen rh-panel">
       <div className="rh-downloads-center" data-testid="downloads-center">
@@ -56,26 +88,20 @@ export function DownloadsScreen({
         <div className="rh-download-list">
           {downloads.length === 0 ? (
             <div className="rh-empty-compact">{t.dashboard.downloads.empty}</div>
-          ) : downloads.map((download) => {
-            const item = itemsByGameId.get(download.gameId) ?? null;
-            return (
-              <DownloadRow
-                key={download.gameId}
-                download={download}
-                item={item}
-                busyAction={busyAction}
-                onOpenDetails={onOpenDetails}
-                onPause={onPause}
-                onResume={onResume}
-                onResumeTo={onResumeTo}
-                onCancel={onCancel}
-                onOpenFolder={onOpenFolder}
-                onDeleteFiles={onDeleteFiles}
-                onPlay={onPlay}
-                onFocus={onFocus}
-              />
-            );
-          })}
+          ) : groups.map(({ parent, children }) => (
+            <div key={parent.gameId} className={children.length > 0 ? 'rh-download-group' : undefined}>
+              <DownloadRow download={parent} item={itemsByGameId.get(parent.gameId) ?? null} {...sharedRowProps} />
+              {children.map((child) => (
+                <DownloadRow
+                  key={child.gameId}
+                  download={child}
+                  item={itemsByGameId.get(child.gameId) ?? null}
+                  isChild
+                  {...sharedRowProps}
+                />
+              ))}
+            </div>
+          ))}
         </div>
       </div>
     </motion.section>
@@ -85,6 +111,7 @@ export function DownloadsScreen({
 function DownloadRow({
   download,
   item,
+  isChild,
   busyAction,
   onOpenDetails,
   onPause,
@@ -98,6 +125,7 @@ function DownloadRow({
 }: {
   download: TorrentDownloadRecord;
   item: GameLibraryItem | null;
+  isChild?: boolean;
   busyAction: BusyAction;
   onOpenDetails: (game: CatalogGame) => void;
   onPause: (gameId: string) => Promise<void>;
@@ -121,7 +149,11 @@ function DownloadRow({
   const subjectLabel = assetDownload ? 'RESOURCE' : download.subjectType === 'game' ? 'GAME' : null;
 
   return (
-    <article className="rh-download-row" data-testid="download-row">
+    <article
+      className={`rh-download-row${isChild ? ' ml-8 border-l-2 border-white/10 pl-4' : ''}`}
+      data-testid="download-row"
+      data-download-child={isChild ? 'true' : undefined}
+    >
       <button
         data-focus-id={`details:${encodeURIComponent(download.gameId)}`}
         data-focus-zone="downloads"
@@ -151,14 +183,8 @@ function DownloadRow({
           <span>{formatSpeed(download.downloadSpeedBytesPerSec)}</span>
           <span>{download.peersCount} {t.common.peers}</span>
         </div>
-        {download.saveDir && (
-          <div className="rh-download-path" title={download.saveDir}>
-            <span>{t.dashboard.downloads.path}</span>
-            <code>{download.saveDir}</code>
-          </div>
-        )}
-        {statusHint && <div className="mt-2 text-xs text-white/42">{statusHint}</div>}
-        {download.errorMessage && <div className="mt-2 text-xs text-red-100">{download.errorMessage}</div>}
+        {statusHint && <div className={`mt-2 text-xs text-white/42 ${download.status === 'error' ? 'select-text' : ''}`}>{statusHint}</div>}
+        {download.errorMessage && <div className="mt-2 select-text text-xs text-red-100">{download.errorMessage}</div>}
       </div>
       <div className="flex flex-wrap justify-end gap-2">
         {active && !direct && download.status !== 'cancelling' && (
@@ -202,24 +228,14 @@ function DownloadRow({
           />
         )}
         {download.saveDir && (
-          <>
-            <IconAction
-              focusId={`download-action:copy-path:${encodeURIComponent(download.gameId)}`}
-              onFocus={onFocus}
-              busy={false}
-              label={t.dashboard.downloads.copyPath}
-              icon={<Clipboard className="h-3.5 w-3.5" />}
-              onClick={() => void navigator.clipboard?.writeText(download.saveDir)}
-            />
-            <IconAction
-              focusId={`download-action:open-folder:${encodeURIComponent(download.gameId)}`}
-              onFocus={onFocus}
-              busy={busyAction === `open-folder:${download.gameId}`}
-              label={t.dashboard.downloads.openFolder}
-              icon={<FolderOpen className="h-3.5 w-3.5" />}
-              onClick={() => onOpenFolder(download.gameId)}
-            />
-          </>
+          <IconAction
+            focusId={`download-action:open-folder:${encodeURIComponent(download.gameId)}`}
+            onFocus={onFocus}
+            busy={busyAction === `open-folder:${download.gameId}`}
+            label={t.dashboard.downloads.openFolder}
+            icon={<FolderOpen className="h-3.5 w-3.5" />}
+            onClick={() => onOpenFolder(download.gameId)}
+          />
         )}
         {removable && (
           <IconAction

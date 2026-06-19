@@ -260,7 +260,46 @@ impl RepositoryStore {
             record.subject_type = Some("asset".to_string());
             record.display_name = Some(asset.display_name);
         }
+        record.parent_game_id = self.get_download_parent(&record.game_id)?;
         Ok(())
+    }
+
+    /// Record that `child_game_id` (e.g. an emulator/core bundle download) belongs
+    /// to the `parent_game_id` install, so the Downloads view can group them.
+    pub fn set_download_parent(
+        &self,
+        child_game_id: &str,
+        parent_game_id: &str,
+    ) -> Result<(), String> {
+        // A download is never its own parent; ignore such a request defensively.
+        if child_game_id == parent_game_id {
+            return Ok(());
+        }
+        let now = Utc::now().to_rfc3339();
+        self.conn
+            .execute(
+                r#"
+            INSERT INTO download_parents (child_game_id, parent_game_id, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(child_game_id) DO UPDATE SET
+              parent_game_id = excluded.parent_game_id,
+              updated_at = excluded.updated_at
+            "#,
+                params![child_game_id, parent_game_id, now],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_download_parent(&self, child_game_id: &str) -> Result<Option<String>, String> {
+        self.conn
+            .query_row(
+                "SELECT parent_game_id FROM download_parents WHERE child_game_id = ?1",
+                params![child_game_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())
     }
 
     pub fn list_startup_torrent_downloads(&self) -> Result<Vec<TorrentDownloadRecord>, String> {

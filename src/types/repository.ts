@@ -326,6 +326,7 @@ export interface TorrentDownloadRecord {
   gameId: string;
   subjectType?: 'asset' | 'game' | null;
   displayName?: string | null;
+  parentGameId?: string | null;
   magnetUri: string;
   saveDir: string;
   status: TorrentDownloadStatus;
@@ -384,6 +385,7 @@ export interface DownloadProgressEvent {
   gameId: string;
   subjectType?: 'asset' | 'game' | null;
   displayName?: string | null;
+  parentGameId?: string | null;
   status: TorrentDownloadStatus;
   progress: number;
   progressPercent: number;

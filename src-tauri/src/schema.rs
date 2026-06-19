@@ -388,6 +388,10 @@ pub struct TorrentDownloadRecord {
     pub game_id: String,
     pub subject_type: Option<String>,
     pub display_name: Option<String>,
+    /// When set, this download is a child of the given game install (e.g. an
+    /// emulator bundle pulled in while installing that game). The Downloads view
+    /// groups children under their parent. Populated at query time.
+    pub parent_game_id: Option<String>,
     pub magnet_uri: String,
     pub save_dir: String,
     pub status: String,
