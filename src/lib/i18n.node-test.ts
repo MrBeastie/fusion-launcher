@@ -22,6 +22,13 @@ describe('i18n dictionaries', () => {
     assert.equal(getUiText('ru').actions.Install, 'Установить');
   });
 
+  it('renders settings chrome in the selected language', () => {
+    assert.equal(getUiText('en').settings.sections.metadata, 'Metadata');
+    assert.equal(getUiText('en').settings.messages.saveSuccess, 'Settings saved. Emulator readiness has been updated.');
+    assert.equal(getUiText('ru').settings.sections.metadata, 'Метаданные');
+    assert.equal(getUiText('ru').settings.messages.saveSuccess, 'Настройки сохранены. Готовность эмуляторов обновлена.');
+  });
+
   it('renders source trust prompts in both languages', () => {
     assert.equal(sourceTrustLabel('official', 'en'), 'Official source');
     assert.equal(sourceTrustLabel('official', 'ru'), 'Официальный источник');

@@ -18,7 +18,7 @@ import { UpdatesSection } from '@/components/settings/UpdatesSection';
 import { api } from '@/lib/api';
 import { isTauriRuntime } from '@/lib/runtime';
 import { getEmulatorPath, type AppSettings } from '@/lib/settings';
-import type { Locale } from '@/lib/i18n';
+import { getUiText, type Locale } from '@/lib/i18n';
 import { countConfiguredEmulators, getEmulatorDraftState, hasEmulatorDraftChanges } from '@/lib/settingsModalState';
 import { EMULATOR_MANAGER_PLATFORMS, PLATFORM_LABELS } from '@/types/platform';
 import type { InstallProgressEvent } from '@/types/emulatorProfile';
@@ -429,7 +429,7 @@ export function SettingsModal({
       }
       setSavedSettings(nextSavedSettings);
       setDraftSettings(nextSavedSettings);
-      setMessage(t.settings.messages.saveSuccess);
+      setMessage(getUiText(nextSavedSettings.language).settings.messages.saveSuccess);
     } catch (error) {
       setMessage(t.settings.messages.saveError(error));
     } finally {

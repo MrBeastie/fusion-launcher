@@ -115,7 +115,7 @@ export const en = {
     sections: {
       general: 'General',
       emulators: 'Emulators',
-      metadata: 'Метаданные',
+      metadata: 'Metadata',
       sources: 'Sources',
       storage: 'Storage',
       diagnostics: 'Diagnostics',
